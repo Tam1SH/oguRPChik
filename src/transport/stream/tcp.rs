@@ -1,8 +1,9 @@
+use std::fmt::Display;
 use crate::transport::stream::{Acceptor, AcceptorBuilder, Connector, Splitable};
 use compio::net::{TcpListener, TcpStream};
 use socket2::SockAddr;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, ToSocketAddrs};
 
 impl Acceptor for TcpListener {
     type Stream = TcpStream;
@@ -32,8 +33,16 @@ impl AcceptorBuilder for TcpAcceptorBuilder {
     type Stream = TcpStream;
     type Acceptor = TcpListener;
 
+    fn local_addr(&self) -> io::Result<impl Display> {
+        Ok(self.addr.to_string())
+    }
+
     async fn bind(self) -> io::Result<Self::Acceptor> {
         TcpListener::bind(self.addr).await
+    }
+
+    fn kind(&self) -> &'static str {
+        "tcp"
     }
 }
 

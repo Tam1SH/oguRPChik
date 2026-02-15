@@ -1,6 +1,8 @@
+use std::mem;
 use compio::buf::{IoBuf, IoBufMut, SetLen};
 use rkyv::util::AlignedVec;
 use std::mem::MaybeUninit;
+use crate::tpc_pool::TpcPool;
 
 #[derive(Default)]
 pub struct AlignedBuffer(pub AlignedVec);
@@ -41,5 +43,20 @@ impl IoBufMut for AlignedBuffer {
 
             std::slice::from_raw_parts_mut(ptr, capacity - len)
         }
+    }
+}
+
+impl AsRef<[u8]> for AlignedBuffer {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_slice()
+    }
+}
+
+impl Drop for AlignedBuffer {
+    fn drop(&mut self) {
+        if self.0.is_empty() {
+            return;
+        }
+        TpcPool::release_body(mem::replace(self, AlignedBuffer::default()));
     }
 }

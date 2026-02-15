@@ -1,13 +1,16 @@
-use crate::client_per_core::ClientPerCore;
-use crate::message_protocol::{MessageProtocol, ResponseGuard};
+use std::marker::PhantomData;
+use crate::client_per_core::{ClientPerCore, ResponseGuard};
+use crate::message_codec::MessageCodec;
 use crate::runtime;
-use crate::transport::raw::TransportConnector;
 use crate::transport::stream::Connector;
 use anyhow::{anyhow, Result};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
+use crate::server::HasDefaultAllocator;
+use crate::transport::base::{MessageSink, MessageSource, TransportBuilder, TransportConnector};
+use crate::transport::topology::Topology;
 
 #[derive(Clone, Copy, Debug)]
 pub enum Priority {
@@ -16,20 +19,20 @@ pub enum Priority {
     Bulk,
 }
 
-struct CallRequest<P: MessageProtocol> {
-    req: P::Request,
-    resp_tx: oneshot::Sender<Result<ResponseGuard<P>>>,
+struct CallRequest<C: MessageCodec, P: AsRef<[u8]> + Send + 'static> {
+    req: C::Request,
+    resp_tx: oneshot::Sender<Result<ResponseGuard<P, C>>>,
 }
 
-pub struct Client<P: MessageProtocol> {
-    critical_lane: flume::Sender<CallRequest<P>>,
-    normal_lanes: Rc<Vec<flume::Sender<CallRequest<P>>>>,
+pub struct Client<C: MessageCodec, P: AsRef<[u8]> + Send + 'static> {
+    critical_lane: flume::Sender<CallRequest<C, P>>,
+    normal_lanes: Rc<Vec<flume::Sender<CallRequest<C, P>>>>,
     rr_normal: Rc<AtomicUsize>,
-    bulk_lanes: Rc<Vec<flume::Sender<CallRequest<P>>>>,
+    bulk_lanes: Rc<Vec<flume::Sender<CallRequest<C, P>>>>,
     rr_bulk: Rc<AtomicUsize>,
 }
 
-impl<P: MessageProtocol> Clone for Client<P> {
+impl<C: MessageCodec, P: AsRef<[u8]> + Send + 'static> Clone for Client<C, P> {
     fn clone(&self) -> Self {
         Self {
             bulk_lanes: self.bulk_lanes.clone(),
@@ -41,27 +44,46 @@ impl<P: MessageProtocol> Clone for Client<P> {
     }
 }
 
-impl<P: MessageProtocol + 'static> Client<P> {
-    pub async fn connect_with<F, C>(
-        limit_cores: usize,
-        connector_factory: F,
-    ) -> anyhow::Result<Self>
+
+impl<C, P> Client<C, P>
+where
+    C: MessageCodec<Dest = P> + 'static,
+    P: AsRef<[u8]> + Send + HasDefaultAllocator + 'static,
+{
+    pub async fn connect<T>(transport: T, topology: Topology) -> Result<Self>
     where
-        F: Fn(usize) -> C,
-        C: TransportConnector,
+        T: TransportBuilder<P>,
     {
-        let available = runtime::core_count();
-        let num_cores = limit_cores.min(available);
+        if topology.transport_kind != transport.kind() {
+            return Err(anyhow!("Topology kind mismatch: {} vs {}", topology.transport_kind, transport.kind()));
+        }
 
-        let connectors: Vec<C> = (0..num_cores).map(connector_factory).collect();
+        if topology.codec_kind != C::kind() {
+            return Err(anyhow!("Codec kind mismatch: {} vs {}", topology.codec_kind, C::kind()));
+        }
 
-        Self::connect(connectors, num_cores).await
+        let num_cores = topology.map.len();
+
+        let mut connectors = Vec::with_capacity(num_cores);
+
+        for i in 0..num_cores {
+            let endpoint = topology.map.get(&i)
+                .ok_or_else(|| anyhow!("Core {} not found in topology", i))?;
+            connectors.push(transport.client_connector(endpoint.clone())?);
+        }
+
+        Self::connect_internal(connectors, num_cores).await
     }
 
-    pub async fn connect<C: TransportConnector>(
-        connectors: Vec<C>,
+    async fn connect_internal<Conn, Si, So>(
+        connectors: Vec<Conn>,
         limit_cores: usize,
-    ) -> Result<Self> {
+    ) -> Result<Self>
+    where
+        Si: MessageSink<Payload = C::Dest> + Clone + 'static,
+        So: MessageSource<Payload = C::Dest> + 'static,
+        Conn: TransportConnector<Si, So>,
+    {
         let available_runtime_cores = runtime::core_count();
 
         let num_cores = limit_cores.min(available_runtime_cores);
@@ -72,7 +94,7 @@ impl<P: MessageProtocol + 'static> Client<P> {
         let (init_tx, init_rx) = flume::bounded::<Result<usize>>(num_cores);
 
         for (core_id, connector) in connectors.into_iter().enumerate() {
-            let (worker_tx, worker_rx) = flume::unbounded::<CallRequest<P>>();
+            let (worker_tx, worker_rx) = flume::unbounded::<CallRequest<C, P>>();
             all_worker_txs.push(worker_tx);
 
             let sync_tx = init_tx.clone();
@@ -80,9 +102,11 @@ impl<P: MessageProtocol + 'static> Client<P> {
             runtime::spawn_on(core_id, move || async move {
                 let connect_res = async {
                     let transport = connector.connect().await?;
-                    ClientPerCore::<P>::connect(transport).await
+
+                    ClientPerCore::<C, Si, So, <C::Dest as HasDefaultAllocator>::Alloc>::connect(transport).await
                 }
-                .await;
+                    .await;
+
 
                 match connect_res {
                     Ok(mut client) => {
@@ -156,7 +180,7 @@ impl<P: MessageProtocol + 'static> Client<P> {
         })
     }
 
-    pub async fn call(&self, req: P::Request, prio: Priority) -> Result<ResponseGuard<P>> {
+    pub async fn call(&self, req: C::Request, prio: Priority) -> Result<ResponseGuard<C::Dest, C>> {
         let tx = match prio {
             Priority::Critical => &self.critical_lane,
             Priority::Normal => {

@@ -1,6 +1,8 @@
+use std::fmt::Display;
 use compio::io::{AsyncRead, AsyncReadAt, AsyncWrite};
 use socket2::SockAddr;
 use std::io;
+use std::net::SocketAddr;
 
 pub mod adapters;
 pub mod tcp;
@@ -24,10 +26,14 @@ pub trait Connector: Send + Sync + 'static {
 pub trait Acceptor: 'static {
     type Stream: AsyncStream;
     async fn accept(&self) -> io::Result<(Self::Stream, SockAddr)>;
+    
 }
 
 pub trait AcceptorBuilder: Send + Sync + 'static {
     type Stream: AsyncStream;
     type Acceptor: Acceptor<Stream = Self::Stream>;
     async fn bind(self) -> io::Result<Self::Acceptor>;
+    fn local_addr(&self) -> io::Result<impl Display>;
+    fn kind(&self) -> &'static str;
+
 }

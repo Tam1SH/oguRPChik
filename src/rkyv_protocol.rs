@@ -1,5 +1,5 @@
 use crate::align_buffer::AlignedBuffer;
-use crate::message_protocol::{Message, MessageProtocol};
+use crate::message_codec::{Envelope, MessageCodec};
 use anyhow::Result;
 use rkyv::api::high::{to_bytes_in, HighSerializer, HighValidator};
 use rkyv::bytecheck::CheckBytes;
@@ -7,6 +7,9 @@ use rkyv::rancor::Error;
 use rkyv::ser::allocator::ArenaHandle;
 use rkyv::util::AlignedVec;
 use rkyv::{access, Archive, Serialize};
+use crate::server::{DefaultVecAlloc, HasDefaultAllocator};
+use crate::tpc_pool::TpcPool;
+use crate::transport::base::BufferAllocator;
 
 #[derive(Archive, Serialize)]
 pub(crate) enum RkyvEnvelope<Req, Res> {
@@ -47,7 +50,7 @@ pub struct RkyvProtocol<Req, Res> {
     _phantom: std::marker::PhantomData<(Req, Res)>,
 }
 
-impl<Req, Res> MessageProtocol for RkyvProtocol<Req, Res>
+impl<Req, Res> MessageCodec for RkyvProtocol<Req, Res>
 where
     Req: SerializeBounds,
     for<'a> Req::Archived: ArchivedBounds,
@@ -63,36 +66,62 @@ where
     type RequestView = Req::Archived;
     type ResponseView = Res::Archived;
 
-    fn decode(data: &[u8]) -> Result<Message<&Self::RequestView, &Self::ResponseView>> {
+    type Dest = AlignedBuffer;
+
+    fn decode(data: &[u8]) -> Result<Envelope<&Self::RequestView, &Self::ResponseView>> {
         let archived = access::<ArchivedRkyvEnvelope<Req, Res>, Error>(data)?;
 
         match archived {
-            ArchivedRkyvEnvelope::Request { id, payload } => Ok(Message::Request {
+            ArchivedRkyvEnvelope::Request { id, payload } => Ok(Envelope::Request {
                 id: u64::from(id),
                 payload,
             }),
-            ArchivedRkyvEnvelope::Response { id, payload } => Ok(Message::Response {
+            ArchivedRkyvEnvelope::Response { id, payload } => Ok(Envelope::Response {
                 id: u64::from(*id),
                 payload,
             }),
-            ArchivedRkyvEnvelope::Push { payload } => Ok(Message::Push { payload }),
+            ArchivedRkyvEnvelope::Push { payload } => Ok(Envelope::Push { payload }),
         }
     }
 
     fn encode(
-        msg: Message<Self::Request, Self::Response>,
-        mut dest: AlignedBuffer,
-    ) -> Result<AlignedBuffer> {
+        msg: Envelope<Self::Request, Self::Response>,
+        dest: &mut AlignedBuffer,
+    ) -> Result<()> {
         dest.0.clear();
 
         let envelope = match msg {
-            Message::Request { id, payload } => RkyvEnvelope::Request { id, payload },
-            Message::Response { id, payload } => RkyvEnvelope::Response { id, payload },
-            Message::Push { payload } => RkyvEnvelope::Push { payload },
+            Envelope::Request { id, payload } => RkyvEnvelope::Request { id, payload },
+            Envelope::Response { id, payload } => RkyvEnvelope::Response { id, payload },
+            Envelope::Push { payload } => RkyvEnvelope::Push { payload },
         };
 
-        let bytes = to_bytes_in::<_, Error>(&envelope, dest.0)?;
+        let writer = std::mem::take(&mut dest.0);
 
-        Ok(AlignedBuffer(bytes))
+        let bytes = to_bytes_in::<_, Error>(&envelope, writer)?;
+
+        dest.0 = bytes;
+
+        Ok(())
+    }
+
+    fn kind() -> &'static str {
+        "rkyv"
     }
 }
+
+#[derive(Clone)]
+pub struct RkyvAllocator;
+
+impl BufferAllocator for RkyvAllocator {
+    type Payload = AlignedBuffer;
+    fn allocate(size_hint: usize) -> Self::Payload {
+        TpcPool::acquire_body(size_hint)
+    }
+}
+
+impl HasDefaultAllocator for AlignedBuffer {
+    type Alloc = RkyvAllocator;
+}
+
+

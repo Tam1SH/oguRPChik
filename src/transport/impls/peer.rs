@@ -1,7 +1,6 @@
 use crate::align_buffer::AlignedBuffer;
 use crate::client::Priority;
 use crate::tpc_pool::{InnerPool, Mixed, TpcPool};
-use crate::transport::raw::{MsgBatch, OutgoingMsg, SendHandle};
 use crate::transport::stream::AsyncStream;
 use bytes::BytesMut;
 use compio::buf::{IntoInner, IoBuf, IoBufMut, IoVectoredBufMut, SetLen, Slice};
@@ -10,6 +9,9 @@ use compio::BufResult;
 use futures::{FutureExt, SinkExt, StreamExt};
 use std::io;
 use tracing::{debug, error, info, instrument, trace};
+use crate::transport::base::handle::{OutgoingMsg, PeerSink, PeerSource};
+use local_sync::mpsc;
+
 
 #[derive(Clone, Debug)]
 pub struct PeerConfig {
@@ -57,30 +59,30 @@ impl Peer {
     pub fn new<S: AsyncStream + Clone + 'static>(
         stream: S,
         config: PeerConfig,
-    ) -> io::Result<(SendHandle, flume::Receiver<AlignedBuffer>)> {
-        let (outgoing_tx, outgoing_rx) = flume::bounded(config.channel_size);
-        let (incoming_tx, incoming_rx) = flume::bounded(config.channel_size);
-
+    ) -> io::Result<(PeerSink, PeerSource)> {
+        let (outgoing_tx, outgoing_rx) = mpsc::bounded::channel(config.channel_size);
+        let (incoming_tx, incoming_rx) = mpsc::bounded::channel(config.channel_size);
+        
         let (writer, reader) = stream.split()?;
 
         compio::runtime::spawn(Self::run_writer(writer, outgoing_rx, config.clone())).detach();
 
         compio::runtime::spawn(Self::run_reader(reader, incoming_tx, config)).detach();
 
-        Ok((SendHandle { outgoing_tx }, incoming_rx))
+        Ok((PeerSink { outgoing_tx }, PeerSource { incoming_rx }))
     }
 
     #[instrument(skip_all, name = "peer_writer")]
     async fn run_writer<W: AsyncWrite>(
         mut writer: W,
-        outgoing_rx: flume::Receiver<OutgoingMsg>,
+        mut outgoing_rx: mpsc::bounded::Rx<OutgoingMsg>,
         config: PeerConfig,
     ) -> anyhow::Result<()> {
         debug!("Writer worker started");
 
         let mut batch = Vec::with_capacity(config.batch_limit * 2);
 
-        while let Ok(msg_enum) = outgoing_rx.recv_async().await {
+        while let Some(msg_enum) = outgoing_rx.recv().await {
             TpcPool::with(|pool| {
                 let add_to_batch = |p: &mut InnerPool, b: &mut Vec<Mixed>, msg: AlignedBuffer| {
                     let header = p.acquire_header(msg.0.len());
@@ -139,7 +141,7 @@ impl Peer {
     #[instrument(skip_all, name = "peer_reader")]
     pub async fn run_reader<R: AsyncRead>(
         mut reader: R,
-        incoming_tx: flume::Sender<AlignedBuffer>,
+        mut incoming_tx: mpsc::bounded::Tx<AlignedBuffer>,
         config: PeerConfig,
     ) -> anyhow::Result<()> {
         debug!("Reader worker started");
@@ -218,7 +220,7 @@ impl Peer {
                     );
                 }
 
-                if incoming_tx.send_async(payload).await.is_err() {
+                if incoming_tx.send(payload).await.is_err() {
                     return Err(anyhow::anyhow!("Channel closed"));
                 }
 
@@ -271,7 +273,7 @@ mod tests {
         let (server_stream, client_stream) = setup_vsock_pair(8000).await;
 
         let (mut s_handle, _) = Peer::new(server_stream, PeerConfig::default()).unwrap();
-        let (_, mut c_rx) = Peer::new(client_stream, PeerConfig::default()).unwrap();
+        let (_, PeerSource { incoming_rx: mut c_rx }) = Peer::new(client_stream, PeerConfig::default()).unwrap();
 
         let msg = vec![1u8, 3u8, 3u8, 7u8];
         let mut a = AlignedVec::with_capacity(4);
@@ -279,7 +281,7 @@ mod tests {
 
         s_handle.send(AlignedBuffer(a.clone())).await.unwrap();
 
-        let received = c_rx.recv_async().await.expect("No message received");
+        let received = c_rx.recv().await.expect("No message received");
         assert_eq!(received.0.as_slice(), a.as_slice());
     }
 
@@ -288,7 +290,7 @@ mod tests {
         let (server_stream, client_stream) = setup_vsock_pair(8001).await;
 
         let (s_handle, _s_rx) = Peer::new(server_stream, PeerConfig::default()).unwrap();
-        let (_c_handle, c_rx) = Peer::new(client_stream, PeerConfig::default()).unwrap();
+        let (_c_handle, PeerSource { incoming_rx: mut c_rx }) = Peer::new(client_stream, PeerConfig::default()).unwrap();
 
         let large_data = vec![0xAAu8; 1024 * 1024];
         let mut a = AlignedVec::with_capacity(1024 * 1024);
@@ -296,7 +298,7 @@ mod tests {
 
         s_handle.send(AlignedBuffer(a.clone())).await.unwrap();
 
-        let received = c_rx.recv_async().await.expect("No message received");
+        let received = c_rx.recv().await.expect("No message received");
         assert_eq!(received.0.len(), large_data.len());
         assert_eq!(received.0.as_slice(), a.as_slice());
     }
@@ -309,8 +311,8 @@ mod tests {
 
         let (server_stream, client_stream) = setup_vsock_pair(8002).await;
 
-        let (mut s_tx, mut s_rx) = Peer::new(server_stream, PeerConfig::default()).unwrap();
-        let (mut c_tx, mut c_rx) = Peer::new(client_stream, PeerConfig::default()).unwrap();
+        let (mut s_tx, PeerSource { incoming_rx: mut s_rx }) = Peer::new(server_stream, PeerConfig::default()).unwrap();
+        let (mut c_tx, PeerSource { incoming_rx: mut c_rx }) = Peer::new(client_stream, PeerConfig::default()).unwrap();
 
         let mut s_data = vec![0x11u8; 64];
         let mut c_data = vec![0x22u8; 64];
@@ -326,13 +328,13 @@ mod tests {
                 let mut a = AlignedVec::with_capacity(c_data.len());
                 a.extend_from_slice(&c_data);
                 c_tx.send(AlignedBuffer(a)).await.unwrap();
-                c_rx.recv_async().await.unwrap()
+                c_rx.recv().await.unwrap()
             },
             async {
                 let mut a = AlignedVec::with_capacity(s_data.len());
                 a.extend_from_slice(&s_data);
                 s_tx.send(AlignedBuffer(a)).await.unwrap();
-                s_rx.recv_async().await.unwrap()
+                s_rx.recv().await.unwrap()
             }
         );
 
@@ -344,7 +346,7 @@ mod tests {
     async fn test_peer_multiple_messages_order() {
         let (server_stream, client_stream) = setup_vsock_pair(8003).await;
         let (mut s_tx, _) = Peer::new(server_stream, PeerConfig::default()).unwrap();
-        let (_, mut c_rx) = Peer::new(client_stream, PeerConfig::default()).unwrap();
+        let (_, PeerSource { incoming_rx: mut c_rx }) = Peer::new(client_stream, PeerConfig::default()).unwrap();
 
         let counts = [10, 20, 30];
 
@@ -355,7 +357,7 @@ mod tests {
         }
 
         for &len in &counts {
-            let received = c_rx.recv_async().await.expect("Failed to receive");
+            let received = c_rx.recv().await.expect("Failed to receive");
             assert_eq!(received.0.len(), len);
             assert!(received.0.iter().all(|&b| b == len as u8));
         }
@@ -365,7 +367,7 @@ mod tests {
     async fn test_peer_zero_length_packet() {
         let (server_stream, client_stream) = setup_vsock_pair(8004).await;
         let (mut s_tx, _) = Peer::new(server_stream, PeerConfig::default()).unwrap();
-        let (_, mut c_rx) = Peer::new(client_stream, PeerConfig::default()).unwrap();
+        let (_, PeerSource { incoming_rx: mut c_rx }) = Peer::new(client_stream, PeerConfig::default()).unwrap();
 
         s_tx.send(AlignedBuffer(AlignedVec::new())).await.unwrap();
 
@@ -373,10 +375,10 @@ mod tests {
         a.extend_from_slice(&[1, 2, 3]);
         s_tx.send(AlignedBuffer(a)).await.unwrap();
 
-        let received = c_rx.recv_async().await.unwrap();
+        let received = c_rx.recv().await.unwrap();
 
         if received.0.is_empty() {
-            let second = c_rx.recv_async().await.unwrap();
+            let second = c_rx.recv().await.unwrap();
             assert_eq!(second.0.as_slice(), &[1, 2, 3]);
         } else {
             assert_eq!(received.0.as_slice(), &[1, 2, 3]);
@@ -391,7 +393,7 @@ mod tests {
         config.read_buffer_capacity = 4096;
 
         let (s_handle, _) = Peer::new(server_stream, PeerConfig::default()).unwrap();
-        let (_, c_rx) = Peer::new(client_stream, config).unwrap();
+        let (_, PeerSource { incoming_rx: mut c_rx }) = Peer::new(client_stream, config).unwrap();
 
         let sizes = vec![100, 4000, 5000, 64 * 1024, 1024 * 1024];
 
@@ -406,7 +408,7 @@ mod tests {
         }
 
         for &size in &sizes {
-            let received = c_rx.recv_async().await.expect("Failed to receive message");
+            let received = c_rx.recv().await.expect("Failed to receive message");
 
             debug!("Received message of len {}", received.0.len());
 
@@ -436,14 +438,15 @@ mod bench_peer {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
+    use crate::tpc_pool::PoolConfig;
 
     async fn create_peer_pair(
         config: PeerConfig,
     ) -> (
-        SendHandle,
-        flume::Receiver<AlignedBuffer>,
-        SendHandle,
-        flume::Receiver<AlignedBuffer>,
+        PeerSink,
+        mpsc::bounded::Rx<AlignedBuffer>,
+        PeerSink,
+        mpsc::bounded::Rx<AlignedBuffer>,
     ) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -455,8 +458,8 @@ mod bench_peer {
         });
 
         let client_stream = TcpStream::connect(addr).await.unwrap();
-        let (c_handle, c_rx) = Peer::new(client_stream, config).unwrap();
-        let (s_handle, s_rx) = server_task.await.unwrap();
+        let (c_handle, PeerSource { incoming_rx: mut c_rx }) = Peer::new(client_stream, config).unwrap();
+        let (s_handle, PeerSource { incoming_rx: mut s_rx }) = server_task.await.unwrap();
 
         (c_handle, c_rx, s_handle, s_rx)
     }
@@ -466,41 +469,50 @@ mod bench_peer {
     static ALLOC: dhat::Alloc = dhat::Alloc;
 
     #[compio::test]
-    async fn stress_test_peer_throughput_with_latency() {
+    async fn stress_test_peer_throughput() {
         #[cfg(feature = "dhat-heap")]
         let _profiler = dhat::Profiler::new_heap();
 
-        let duration = Duration::from_secs(5);
-        let msg_size = 64;
+        TpcPool::init(PoolConfig::stress());
+
+        let duration = Duration::from_secs(10);
+
+        let msg_sizes = [64, 512, 4096, 16384, 65536];
 
         let config = PeerConfig {
             priority: Priority::Normal,
-            channel_size: 8,
-            batch_limit: 16,
-            read_buffer_capacity: 32 * 1024,
+            channel_size: 1024,
+            batch_limit: 64,
+            read_buffer_capacity: 512 * 1024,
         };
 
-        let (c_handle, _c_rx, _s_handle, s_rx) = create_peer_pair(config).await;
+        let (c_handle, _c_rx, _s_handle, mut s_rx) = create_peer_pair(config).await;
 
         let total_msgs = Arc::new(AtomicU64::new(0));
+        let total_bytes = Arc::new(AtomicU64::new(0));
         let total_latency_ns = Arc::new(AtomicU64::new(0));
         let latency_samples = Arc::new(AtomicU64::new(0));
 
         let t_msgs = total_msgs.clone();
+        let t_bytes = total_bytes.clone();
         let t_lat = total_latency_ns.clone();
         let l_samples = latency_samples.clone();
 
+        let start = Instant::now();
+
         compio::runtime::spawn(async move {
-            while let Ok(msg) = s_rx.recv_async().await {
+            while let Some(msg) = s_rx.recv().await {
                 t_msgs.fetch_add(1, Ordering::Relaxed);
+                t_bytes.fetch_add(msg.0.len() as u64, Ordering::Relaxed);
 
                 if msg.0.len() >= 8 {
-                    let sent_at_bits = u64::from_le_bytes(msg.0[..8].try_into().unwrap());
-                    if sent_at_bits != 0 {
-                        let sent_at =
-                            Instant::now().checked_sub(Duration::from_nanos(sent_at_bits));
-                        if let Some(elapsed) = sent_at {
-                            t_lat.fetch_add(elapsed.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    let sent_at_nanos = u64::from_le_bytes(msg.0[..8].try_into().unwrap());
+                    if sent_at_nanos != 0 {
+                        let now_nanos = start.elapsed().as_nanos() as u64;
+
+                        if now_nanos > sent_at_nanos {
+                            let latency = now_nanos - sent_at_nanos;
+                            t_lat.fetch_add(latency, Ordering::Relaxed);
                             l_samples.fetch_add(1, Ordering::Relaxed);
                         }
                     }
@@ -508,24 +520,28 @@ mod bench_peer {
                 TpcPool::release_body(msg);
             }
         })
-        .detach();
+            .detach();
+
 
         let start = Instant::now();
+        let num_producers = 1;
 
-        for _ in [1] {
+        for p_id in 0..num_producers {
             let h = c_handle.clone();
-            compio::runtime::spawn(async move {
-                let mut local_counter = 0u64;
-                loop {
-                    local_counter += 1;
-                    let mut buf = TpcPool::acquire_body(msg_size);
-                    unsafe {
-                        buf.set_len(msg_size);
-                    }
+            let start_time = Instant::now();
 
-                    if local_counter % 10000 == 0 {
-                        let now_ns = start.elapsed().as_nanos() as u64;
-                        buf.0[..8].copy_from_slice(&now_ns.to_le_bytes());
+            compio::runtime::spawn(async move {
+                let mut iteration = 0u64;
+                loop {
+                    iteration += 1;
+                    let msg_size = msg_sizes[(iteration as usize + p_id) % msg_sizes.len()];
+
+                    let mut buf = TpcPool::acquire_body(msg_size);
+                    unsafe { buf.set_len(msg_size); }
+
+                    if iteration % 100 == 0 {
+                        let ts = start_time.elapsed().as_nanos() as u64;
+                        buf.0[..8].copy_from_slice(&ts.to_le_bytes());
                     } else {
                         buf.0[..8].fill(0);
                     }
@@ -535,32 +551,21 @@ mod bench_peer {
                     }
                 }
             })
-            .detach();
+                .detach();
         }
 
         compio::time::sleep(duration).await;
 
         let total = total_msgs.load(Ordering::Acquire);
-        let samples = latency_samples.load(Ordering::Acquire);
-        let lat_sum = total_latency_ns.load(Ordering::Acquire);
-
+        let bytes = total_bytes.load(Ordering::Acquire);
         let elapsed = start.elapsed().as_secs_f64();
-        let rps = total as f64 / elapsed;
-        let avg_latency_us = if samples > 0 {
-            (lat_sum as f64 / samples as f64) / 1000.0
-        } else {
-            0.0
-        };
 
-        println!("\n📊 PEER PERFORMANCE REPORT");
-        println!("RPS:          {:.2} req/sec", rps);
-        println!(
-            "Throughput:   {:.2} MB/sec",
-            (total * (msg_size as u64 + 4)) as f64 / 1024.0 / 1024.0 / elapsed
-        );
-        println!(
-            "Avg Latency:  {:.2} μs (sampled every 1000th msg)",
-            avg_latency_us
-        );
+        println!("\n🚀 AGGRESSIVE PEER REPORT");
+        println!("RPS:          {:.2} req/sec", total as f64 / elapsed);
+        println!("Throughput:   {:.2} MB/sec", (bytes as f64 / 1024.0 / 1024.0) / elapsed);
+        println!("Total Msgs:   {}", total);
+        println!("Avg Msg Size: {} bytes", if total > 0 { bytes / total } else { 0 });
+        println!("---------------------------------");
     }
+
 }

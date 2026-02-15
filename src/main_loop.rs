@@ -1,7 +1,6 @@
 use crate::align_buffer::AlignedBuffer;
-use crate::message_protocol::{Message, MessageProtocol};
+use crate::message_codec::{Envelope, MessageCodec};
 use crate::tpc_pool::TpcPool;
-use crate::transport::raw::{IncomingMsg, MsgBatch, RawTransport, SendHandle};
 use crate::ServiceHandler;
 use compio::buf::IoBuf;
 use std::collections::HashMap;
@@ -10,83 +9,67 @@ use std::rc::Rc;
 use dashmap::DashMap;
 use std::sync::Arc;
 use tracing::error;
-pub async fn session_loop<P, H>(
-    incoming_rx: flume::Receiver<AlignedBuffer>,
-    peer: SendHandle,
-    pending: Rc<DashMap<u64, oneshot::Sender<AlignedBuffer>>>,
-    handler: H,
-) where
-    P: MessageProtocol,
-    H: ServiceHandler<P>,
+use crate::transport::base::handle::{MsgBatch, PeerSink};
+use crate::transport::base::{BufferAllocator, MessageSink, MessageSource, Transport};
+
+pub trait SessionConfig {
+    type Codec: MessageCodec<Dest = Self::Payload>;
+    type Payload: AsRef<[u8]> + 'static;
+    type Alloc: BufferAllocator<Payload = Self::Payload>;
+}
+
+impl<P, A, Pay> SessionConfig for (P, A)
+where
+    P: MessageCodec<Dest = Pay>,
+    A: BufferAllocator<Payload = Pay>,
+    Pay: AsRef<[u8]> + 'static,
 {
-    while let Ok(first_raw) = incoming_rx.recv_async().await {
-        let mut in_batch = MsgBatch::new();
-        in_batch.push(first_raw);
+    type Codec = P;
+    type Payload = Pay;
+    type Alloc = A;
+}
 
-        while in_batch.len() < in_batch.capacity() {
-            if let Ok(next_raw) = incoming_rx.try_recv() {
-                in_batch.push(next_raw);
-            } else {
-                break;
-            }
-        }
+pub async fn run_session<C, H, Sink, Source>(
+    handler: H,
+    sink: Sink,
+    mut source: Source,
+    pending: Rc<DashMap<u64, oneshot::Sender<C::Payload>>>,
+)
+where
+    C: SessionConfig,
+    H: ServiceHandler<C::Codec>,
+    Sink: MessageSink<Payload = C::Payload>,
+    Source: MessageSource<Payload = C::Payload>,
+{
+    while let Some(raw) = source.recv().await {
 
-        let handler = handler.clone();
-        let mut pending = pending.clone();
-        let peer = peer.clone();
-        compio::runtime::spawn(async move {
-            let mut out_batch = MsgBatch::new();
+        match C::Codec::decode(raw.as_ref()) {
+            Ok(Envelope::Request { id, payload }) => {
+                if let Ok(resp) = handler.on_request(payload).await {
 
-            for raw in in_batch {
-                match P::decode(&raw.0) {
-                    Ok(Message::Request { id, payload }) => {
-                        if let Ok(resp) = handler.on_request(payload).await {
-                            let out_buf = TpcPool::acquire_body(0);
-                            if let Ok(final_buf) =
-                                P::encode(Message::Response { id, payload: resp }, out_buf)
-                            {
-                                out_batch.push(final_buf);
-                            }
-                        }
-                        TpcPool::release_body(raw);
-                    }
-                    Ok(Message::Push { payload }) => {
-                        let _ = handler.on_request(payload).await;
-                        TpcPool::release_body(raw);
-                    }
-                    Ok(Message::Response { id, .. }) => {
-                        if let Some((_, tx)) = pending.remove(&id) {
-                            let _ = tx.send(raw);
-                        } else {
-                            TpcPool::release_body(raw);
-                        }
-                    }
-                    Err(e) => {
-                        error!("Protocol decode error: {e}");
-                        TpcPool::release_body(raw);
+                    type Size<C: MessageCodec> = Envelope<C::Request, C::Response>;
+
+                    let mut out_buf = C::Alloc::allocate(size_of::<Size<C::Codec>>());
+
+                    if C::Codec::encode(Envelope::Response { id, payload: resp }, &mut out_buf).is_ok() {
+                        let _ = sink.send(out_buf).await;
                     }
                 }
             }
+            Ok(Envelope::Push { payload }) => {
 
-            if !out_batch.is_empty() {
-                let _ = peer.send_batch(out_batch).await;
+                let _ = handler.on_request(payload).await;
             }
-        })
-        .detach();
+            Ok(Envelope::Response { id, .. }) => {
+                if let Some((_, tx)) = pending.remove(&id) {
+                    let _ = tx.send(raw);
+                }
+            }
+            Err(e) => {
+                error!("Protocol decode error: {e}");
+            }
+        }
     }
+
 }
 
-pub async fn handle_connection<P, H, T>(transport: T, handler: H) -> anyhow::Result<()>
-where
-    P: MessageProtocol,
-    T: RawTransport,
-    H: ServiceHandler<P>,
-{
-    let (peer_handle, rx) = transport.decompose()?;
-
-    let pending = Rc::new(DashMap::new());
-
-    session_loop::<P, H>(rx, peer_handle, pending, handler).await;
-
-    Ok(())
-}

@@ -4,6 +4,7 @@ pub mod linux;
 #[cfg(windows)]
 pub mod windows;
 
+use std::fmt::Display;
 use crate::transport::stream::vsock::general::{VListener, VStream};
 use crate::transport::stream::{Acceptor, AcceptorBuilder, Connector, Splitable};
 use compio::buf::{IoBuf, IoBufMut};
@@ -11,6 +12,7 @@ use compio::io::{AsyncRead, AsyncWrite};
 use compio::BufResult;
 use socket2::SockAddr;
 use std::io;
+use std::net::ToSocketAddrs;
 
 pub struct VsockConnector {
     pub cid: u32,
@@ -38,6 +40,7 @@ impl Acceptor for VListener {
     async fn accept(&self) -> io::Result<(Self::Stream, SockAddr)> {
         Ok(self.accept().await?)
     }
+
 }
 
 pub struct VsockAcceptorBuilder {
@@ -57,6 +60,14 @@ impl AcceptorBuilder for VsockAcceptorBuilder {
 
     async fn bind(self) -> io::Result<Self::Acceptor> {
         VListener::bind(self.port).map_err(Into::into)
+    }
+
+    fn local_addr(&self) -> io::Result<impl Display> {
+        Ok(format!("{}:{}", self.cid, self.port))
+    }
+
+    fn kind(&self) -> &'static str {
+        "vsock"
     }
 }
 

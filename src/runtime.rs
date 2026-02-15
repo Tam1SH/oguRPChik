@@ -2,7 +2,7 @@ use crate::utils::set_thread_high_priority;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::OnceLock;
-use tracing::info;
+use tracing::{info, trace};
 
 type Job = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()>>> + Send>;
 
@@ -12,12 +12,11 @@ struct CoreRuntime {
 
 static POOL: OnceLock<Vec<CoreRuntime>> = OnceLock::new();
 
-pub fn init() {
+pub fn init(num_cores: usize) {
     if POOL.get().is_some() {
         return;
     }
 
-    let num_cores = num_cpus::get();
     let mut runtimes = Vec::with_capacity(num_cores);
 
     for core_id in 0..num_cores {
@@ -36,7 +35,7 @@ pub fn init() {
             runtime.block_on(async move {
                 while let Ok(factory) = rx.recv_async().await {
                     let local_future = factory();
-
+                    trace!("append new task");
                     compio::runtime::spawn(local_future).detach();
                 }
             });

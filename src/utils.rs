@@ -1,6 +1,6 @@
 use tracing::{debug, warn};
 
-pub fn current_cpu() -> usize {
+pub fn current_cpu_core() -> usize {
     #[cfg(target_os = "linux")]
     unsafe {
         libc::sched_getcpu() as usize
