@@ -13,14 +13,13 @@
 
 ## 🧐 Motivation
 
-This crate is actively used in my main project for duplex communication (Host <-> VM).
+This crate is actively used in my main project for duplex communication (Host <-> VM, Host <-> Plugins).
 
 However, let's be honest: I didn't extract it into a separate library for "better modularity" or "architectural purity". I did it because the pun **Ogurpchik** (*Ogurets* + *RPC*) popped into my head, and I simply needed a public repository to make the joke official.
 
 ## 🚀 Features
 
-- **Transport Agnostic**: Works over TCP, VSOCK, or whatever else you can implement `Stream` for.
-- **IPC Ready**: Designed with Shared Memory interactions in mind.
+- **Transport Agnostic**: Works over TCP, VSOCK, SHM, or any other communication backend you choose to implement.
 - **Blazingly Adequate**: Uses `compio` and `rkyv` to ensure that if something is slow, it's probably not the serialization.
 
 ## License
