@@ -21,7 +21,6 @@ use iceoryx2::waitset::WaitSetBuilder;
 use tracing::{debug, error, info, trace, warn};
 use crate::align_buffer::AlignedBuffer;
 use crate::server::HasDefaultAllocator;
-use crate::rkyv_protocol::RkyvAllocator;
 use crate::tpc_pool::TpcPool;
 use crate::transport::base::{BufferAllocator, MessageSink, MessageSource, RawMessageSink, RawMessageSource, TopologyRegistry, Transport, TransportAcceptor, TransportPerWorkerBuilder, TransportConnector, NoOpInitializer};
 use crate::transport::impls::shm::reactor::GlobalReactor;
@@ -243,20 +242,26 @@ impl RawMessageSource for IceoryxRawSource {
 
     fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<anyhow::Result<AlignedBuffer>> {
 
-        if let Ok(Some(sample)) = self.subscriber.receive() {
+        for _ in 0..1000 {
+            if let Ok(Some(sample)) = self.subscriber.receive() {
 
-            trace!(len = sample.len(), "Iceoryx message received (fast path)");
-            return Poll::Ready(Ok(self.extract_buffer(sample)));
+                trace!(len = sample.len(), "Iceoryx message received (spin-loop path)");
+                return Poll::Ready(Ok(self.extract_buffer(sample)));
+            }
+
+            std::hint::spin_loop();
         }
 
-        trace!("No data available, registering waker");
         GlobalReactor::get().register(self.attachment_id.clone(), cx.waker().clone());
 
         if let Ok(Some(sample)) = self.subscriber.receive() {
-            trace!(len = sample.len(), "Iceoryx message received (after registration)");
+
+            GlobalReactor::get().unregister(&self.attachment_id);
+            trace!(len = sample.len(), "Iceoryx message received (after-registration path)");
             return Poll::Ready(Ok(self.extract_buffer(sample)));
         }
 
+        trace!("No data available after spin, falling asleep");
         Poll::Pending
     }
 }
@@ -366,8 +371,7 @@ mod tests {
 
     #[compio::test]
     async fn test_iceoryx_ping_pong_single_threaded() -> anyhow::Result<()> {
-
-        tracing_subscriber::fmt().with_max_level(tracing::Level::TRACE).init();
+        // tracing_subscriber::fmt().with_max_level(tracing::Level::TRACE).init();
 
 
         let base_name = gen_service_name("pp");
@@ -424,7 +428,6 @@ mod tests {
     #[test]
     fn bench_iceoryx() {
 
-        tracing_subscriber::fmt().with_max_level(tracing::Level::DEBUG).init();
 
         crate::runtime::init(num_cpus::get());
 
@@ -478,7 +481,7 @@ mod tests {
         });
 
 
-        match done_rx.recv_timeout(std::time::Duration::from_secs(1000)) {
+        match done_rx.recv_timeout(Duration::from_secs(10)) {
             Ok((elapsed, iterations)) => {
                 let avg_latency = elapsed / iterations as u32;
                 let ops_per_sec = iterations as f64 / elapsed.as_secs_f64();

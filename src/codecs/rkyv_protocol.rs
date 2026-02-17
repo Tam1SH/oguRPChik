@@ -46,11 +46,12 @@ impl<T> ArchivedBounds for T where
 {
 }
 
-pub struct RkyvProtocol<Req, Res> {
+#[derive(Clone)]
+pub struct RkyvCodec<Req, Res> {
     _phantom: std::marker::PhantomData<(Req, Res)>,
 }
 
-impl<Req, Res> MessageCodec for RkyvProtocol<Req, Res>
+impl<Req, Res> MessageCodec for RkyvCodec<Req, Res>
 where
     Req: SerializeBounds,
     for<'a> Req::Archived: ArchivedBounds,
@@ -63,12 +64,12 @@ where
     type Request = Req;
     type Response = Res;
 
-    type RequestView = Req::Archived;
-    type ResponseView = Res::Archived;
+    type RequestView<'a> = &'a Req::Archived;
+    type ResponseView<'a> = &'a Res::Archived;
 
     type Dest = AlignedBuffer;
 
-    fn decode(data: &[u8]) -> Result<Envelope<&Self::RequestView, &Self::ResponseView>> {
+    fn decode(data: &[u8]) -> Result<Envelope<Self::RequestView<'_>, Self::ResponseView<'_>>> {
         let archived = access::<ArchivedRkyvEnvelope<Req, Res>, Error>(data)?;
 
         match archived {

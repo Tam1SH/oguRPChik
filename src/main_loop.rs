@@ -41,35 +41,55 @@ where
     Sink: MessageSink<Payload = C::Payload>,
     Source: MessageSource<Payload = C::Payload>,
 {
+    enum OnRequestAction<C: SessionConfig> {
+        SendResponse { id: u64, resp: <<C as SessionConfig>::Codec as MessageCodec>::Response },
+        DoNothing,
+    }
+
     while let Some(raw) = source.recv().await {
+        
+        let response_id = match C::Codec::decode(raw.as_ref()) {
+            Ok(Envelope::Response { id, .. }) => Some(id),
+            _ => None,
+        };
 
-        match C::Codec::decode(raw.as_ref()) {
+        if let Some(id) = response_id {
+            if let Some((_, tx)) = pending.remove(&id) {
+                
+                let _ = tx.send(raw);
+            }
+            continue; 
+        }
+
+        let action = match C::Codec::decode(raw.as_ref()) {
             Ok(Envelope::Request { id, payload }) => {
-                if let Ok(resp) = handler.on_request(payload).await {
-
-                    type Size<C: MessageCodec> = Envelope<C::Request, C::Response>;
-
-                    let mut out_buf = C::Alloc::allocate(size_of::<Size<C::Codec>>());
-
-                    if C::Codec::encode(Envelope::Response { id, payload: resp }, &mut out_buf).is_ok() {
-                        let _ = sink.send(out_buf).await;
-                    }
+                match handler.on_request(payload).await {
+                    Ok(resp) => OnRequestAction::SendResponse { id, resp },
+                    Err(_) => OnRequestAction::<C>::DoNothing,
                 }
             }
             Ok(Envelope::Push { payload }) => {
-
                 let _ = handler.on_request(payload).await;
-            }
-            Ok(Envelope::Response { id, .. }) => {
-                if let Some((_, tx)) = pending.remove(&id) {
-                    let _ = tx.send(raw);
-                }
+                OnRequestAction::DoNothing
             }
             Err(e) => {
                 error!("Protocol decode error: {e}");
+                OnRequestAction::DoNothing
+            }
+            _ => unreachable!("Response handled above"),
+        };
+
+        
+        if let OnRequestAction::SendResponse { id, resp } = action {
+            
+            type Env<C: MessageCodec> = Envelope<C::Request, C::Response>;
+            let size_hint = std::mem::size_of::<Env<C::Codec>>();
+
+            let mut out_buf = C::Alloc::allocate(size_hint);
+
+            if C::Codec::encode(Envelope::Response { id, payload: resp }, &mut out_buf).is_ok() {
+                let _ = sink.send(out_buf).await;
             }
         }
     }
-
 }
-

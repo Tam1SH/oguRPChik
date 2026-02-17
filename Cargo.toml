@@ -34,6 +34,8 @@ iceoryx2 = "0.8.1"
 lazy_static = "1.5.0"
 serde = { version = "1.0.228", features = ["derive"] }
 async-trait = "0.1.89"
+serde_json = "1.0.149"
+bitcode = { version = "0.6.9", features = ["serde"] }
 
 [profile.release]
 debug = true

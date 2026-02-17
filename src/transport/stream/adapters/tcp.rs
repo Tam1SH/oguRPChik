@@ -9,15 +9,13 @@ use crate::transport::stream::tcp::{TcpAcceptorBuilder, TcpConnector};
 #[derive(Clone)]
 pub struct TcpTransport {
     host: String,
-    base_port: u32,
     config: PeerConfig,
 }
 
 impl TcpTransport {
-    pub fn new(host: String, base_port: u32, config: PeerConfig) -> Self {
+    pub fn new(host: String, config: PeerConfig) -> Self {
         Self {
             host,
-            base_port,
             config
         }
     }

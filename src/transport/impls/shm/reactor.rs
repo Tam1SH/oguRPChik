@@ -82,6 +82,9 @@ impl GlobalReactor {
         self.wakers.insert(id, waker);
     }
 
+    pub fn unregister(&self, id: &WaitSetAttachmentId<ipc::Service>) {
+        self.wakers.remove(id);
+    }
     pub fn attach(&self, listener: Listener<ipc::Service>) -> WaitSetAttachmentId<ipc::Service> {
         let (tx, rx) = flume::bounded(1);
         self.cmd_tx.send(ReactorCmd::Attach(listener, tx)).unwrap();

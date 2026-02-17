@@ -5,7 +5,6 @@ pub mod client;
 pub mod client_per_core;
 pub mod main_loop;
 pub mod message_codec;
-pub mod rkyv_protocol;
 pub mod runtime;
 pub mod utils;
 pub mod worker;
@@ -13,118 +12,155 @@ pub mod tpc_pool;
 pub mod transport;
 
 mod align_buffer;
+pub mod codecs;
 
 use crate::message_codec::MessageCodec;
 
 pub trait ServiceHandler<C: MessageCodec>: Clone + Send + Sync + 'static {
-    async fn on_request(&self, req: &C::RequestView) -> anyhow::Result<C::Response>;
+    async fn on_request(&self, req: C::RequestView<'_>) -> anyhow::Result<C::Response>;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::setup;
+    use crate::server::{setup, HasDefaultAllocator};
     use crate::client::{Client, Priority};
-    use crate::rkyv_protocol::RkyvProtocol;
     use crate::transport::stream::adapters::tcp::TcpTransport;
     use std::ops::Deref;
     use std::time::Duration;
     use rkyv::{Archive, Deserialize, Serialize};
+    use tracing::error;
     use crate::align_buffer::AlignedBuffer;
+    use crate::codecs::rkyv_protocol::RkyvCodec;
+    use crate::codecs::serde_compatible::bitcode::BitcodeCodec;
+    use crate::codecs::serde_compatible::json::JsonCodec;
     use crate::transport::base::TransportBuilder;
     use crate::transport::impls::peer::PeerConfig;
     use crate::transport::stream::adapters::shm::ShmTransport;
     use crate::transport::stream::adapters::vsock::VsockTransport;
     use crate::transport::topology::RpcTopologyRegistry;
 
-    #[derive(Archive, Deserialize, Serialize, Debug)]
-    #[rkyv(derive(Debug, PartialEq, Eq))]
+    #[derive(Archive, Deserialize, Serialize, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+    #[rkyv(compare(PartialEq), derive(Debug, PartialEq, Eq))]
     pub enum Request {
         Ping,
     }
 
-    #[derive(Archive, Deserialize, Serialize, Debug, PartialEq)]
-    #[rkyv(derive(Debug, PartialEq, Eq))]
+    #[derive(Archive, Deserialize, Serialize, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+    #[rkyv(compare(PartialEq), derive(Debug, PartialEq, Eq))]
     pub enum Response {
         Pong,
     }
     
     #[derive(Clone)]
     struct EchoHandler;
-    impl ServiceHandler<RkyvProtocol<Request, Response>> for EchoHandler {
-        async fn on_request(&self, req: &ArchivedRequest) -> anyhow::Result<Response> {
+    impl ServiceHandler<RkyvCodec<Request, Response>> for EchoHandler {
+        async fn on_request<'a>(&self, req: &ArchivedRequest) -> anyhow::Result<Response> {
             match req {
                 ArchivedRequest::Ping => Ok(Response::Pong),
+            }
+        }
+    }
 
+    impl ServiceHandler<JsonCodec<Request, Response>> for EchoHandler {
+        async fn on_request<'a>(&self, req: Request) -> anyhow::Result<Response> {
+            match req {
+                Request::Ping => Ok(Response::Pong),
+            }
+        }
+    }
+
+    impl ServiceHandler<BitcodeCodec<Request, Response>> for EchoHandler {
+        async fn on_request<'a>(&self, req: Request) -> anyhow::Result<Response> {
+            match req {
+                Request::Ping => Ok(Response::Pong),
+                _ => Err(anyhow::anyhow!("Expected Ping, got {:?}", req)),
+            }
+        }
+    }
+
+
+    impl<P> ServiceHandler<P> for EchoHandler
+    where
+        P: MessageCodec<Request = Request, Response = Response>,
+        for<'a> P::RequestView<'a>: Deref<Target = Request>,
+    {
+        async fn on_request<'a>(&self, req: P::RequestView<'a>) -> anyhow::Result<Response> {
+            match *req {
+                Request::Ping => Ok(Response::Pong),
                 _ => Err(anyhow::anyhow!("not a ping")),
             }
         }
     }
 
-    async fn run_rpc_test<T>(transport: T) -> anyhow::Result<()>
-    where
-        T: TransportBuilder<AlignedBuffer> + Send + Sync + Clone + 'static
-    {
-        let num_cores = 2;
+    macro_rules! rpc_call {
+        ($transport:expr, $protocol:ty, $handler:expr, $request:expr) => {{
+            let transport = $transport;
+            let num_cores = 2;
 
-        runtime::init(num_cores);
+            let _ = crate::runtime::init(num_cores);
 
-        let codec_name = RkyvProtocol::<Request, Response>::kind();
-        let registry = RpcTopologyRegistry::new(num_cores, transport.kind(), codec_name.to_string());
+            let codec_name = <$protocol>::kind();
+            let registry = RpcTopologyRegistry::new(num_cores, transport.kind(), codec_name.to_string());
 
-        let srv_reg = registry.clone();
-        let srv_trans = transport.clone();
+            let srv_reg = registry.clone();
+            let srv_trans = transport.clone();
+            let srv_handler = $handler.clone();
 
-        compio::runtime::spawn(async move {
-            setup()
-                .with_transport(srv_trans)
-                .with_registry(srv_reg)
-                .cores(num_cores)
-                .service(EchoHandler)
-                .run()
+            compio::runtime::spawn(async move {
+                let Err(e) = setup()
+                    .with_transport(srv_trans)
+                    .with_registry(srv_reg)
+                    .cores(num_cores)
+                    .service::<_, $protocol>(srv_handler)
+                    .run()
+                    .await;
+
+                panic!("server error {}", e);
+            }).detach();
+
+            let topology = registry.ready().await;
+
+            let client = Client::<$protocol, _>::connect(transport, topology)
                 .await
-                .expect("Failed to start server");
-        }).detach();
+                .expect("Failed to connect client");
+
+            client.call($request, Priority::Normal).await.expect("Call failed")
+        }};
+    }
 
 
-        let topology = registry.ready().await;
+    #[compio::test]
+    async fn test_rpc_tcp() -> anyhow::Result<()> {
+        let transport = TcpTransport::new("127.0.0.1".to_string(), PeerConfig::default());
 
-        let client = Client::<RkyvProtocol<Request, Response>, _>::connect(transport, topology)
-            .await
-            .expect("Failed to connect client");
+        let res = rpc_call!(transport, RkyvCodec<Request, Response>, EchoHandler, Request::Ping);
 
-        let res = client
-            .call(Request::Ping, Priority::Normal)
-            .await
-            .expect("Call failed");
-
-        assert_eq!(*res.deref(), ArchivedResponse::Pong);
+        assert_eq!(**res.deref(), ArchivedResponse::Pong);
         Ok(())
     }
 
     #[compio::test]
-    async fn test_rpc_tcp() -> anyhow::Result<()> {
-        use crate::transport::stream::adapters::tcp::TcpTransport;
-
-        let transport = TcpTransport::new("127.0.0.1".to_string(), 0, PeerConfig::default());
-        run_rpc_test(transport).await
-    }
-
-    #[compio::test]
     async fn test_rpc_vsock() -> anyhow::Result<()> {
-
         let transport = VsockTransport::new(0, 5000, PeerConfig::default());
-        run_rpc_test(transport).await
+
+        let res = rpc_call!(transport, JsonCodec<Request, Response>, EchoHandler, Request::Ping);
+
+        assert_eq!(*res.deref(), Response::Pong);
+        Ok(())
     }
 
     #[compio::test]
     async fn test_rpc_shm() -> anyhow::Result<()> {
-
         let service_base_name = format!("test_shm_{}", std::process::id());
         let transport = ShmTransport::new(&service_base_name);
 
-        run_rpc_test(transport).await
+        let res = rpc_call!(transport, BitcodeCodec<Request, Response>, EchoHandler, Request::Ping);
+
+        assert_eq!(*res.deref(), Response::Pong);
+        Ok(())
     }
+
 
 }
 
@@ -133,7 +169,7 @@ mod bench_tests {
     use super::*;
     use crate::server::setup;
     use crate::client::{Client, Priority};
-    use crate::rkyv_protocol::RkyvProtocol;
+
     use crate::transport::stream::adapters::tcp::TcpTransport;
     use futures::stream::FuturesUnordered;
     use futures::StreamExt;
@@ -142,6 +178,7 @@ mod bench_tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
+    use crate::codecs::rkyv_protocol::RkyvCodec;
     use crate::transport::base::TransportBuilder;
     use crate::transport::impls::peer::PeerConfig;
     use crate::transport::topology::RpcTopologyRegistry;
@@ -164,8 +201,8 @@ mod bench_tests {
 
     #[derive(Clone)]
     struct EchoHandler;
-    impl ServiceHandler<RkyvProtocol<Request, Response>> for EchoHandler {
-        async fn on_request(&self, req: &ArchivedRequest) -> anyhow::Result<Response> {
+    impl ServiceHandler<RkyvCodec<Request, Response>> for EchoHandler {
+        async fn on_request<'a>(&self, req: &ArchivedRequest) -> anyhow::Result<Response> {
             match req {
                 ArchivedRequest::Ping => Ok(Response::Pong),
                 ArchivedRequest::SmallTask(val) => Ok(Response::Processed(u64::from(*val))),
@@ -180,9 +217,9 @@ mod bench_tests {
 
         let test_duration = Duration::from_secs(10);
 
-        let transport = TcpTransport::new("127.0.0.1".to_string(), 0, PeerConfig::default());
+        let transport = TcpTransport::new("127.0.0.1".to_string(), PeerConfig::default());
 
-        let codec_name = RkyvProtocol::<Request, Response>::kind();
+        let codec_name = RkyvCodec::<Request, Response>::kind();
 
         let registry = RpcTopologyRegistry::new(num_cpus::get(), transport.kind(), codec_name.to_string());
 
@@ -208,7 +245,7 @@ mod bench_tests {
         let topology = registry.ready().await;
 
         let client =
-            Client::<RkyvProtocol<Request, Response>, _>::connect(transport, topology)
+            Client::<RkyvCodec<Request, Response>, _>::connect(transport, topology)
                 .await
                 .expect("Failed to connect FatClient");
 
@@ -346,9 +383,9 @@ mod bench_tests {
         let test_duration = Duration::from_secs(5);
         let num_cores = num_cpus::get();
 
-        let transport = TcpTransport::new("127.0.0.1".to_string(), 0, PeerConfig::default());
+        let transport = TcpTransport::new("127.0.0.1".to_string(), PeerConfig::default());
 
-        let codec_name = RkyvProtocol::<Request, Response>::kind();
+        let codec_name = RkyvCodec::<Request, Response>::kind();
 
         let registry = RpcTopologyRegistry::new(num_cpus::get(), transport.kind(), codec_name.to_string());
 
@@ -372,7 +409,7 @@ mod bench_tests {
         let topology = registry.ready().await;
 
         let client =
-            Client::<RkyvProtocol<Request, Response>, _>::connect(transport, topology)
+            Client::<RkyvCodec<Request, Response>, _>::connect(transport, topology)
                 .await
                 .expect("Failed to connect FatClient");
 

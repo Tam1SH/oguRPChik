@@ -112,46 +112,56 @@ where
     }
 }
 
-pub struct ResponseGuard<Payload: AsRef<[u8]> + Send, Codec: MessageCodec> {
+pub struct ResponseGuard<Payload: AsRef<[u8]> + Send + 'static, Codec: MessageCodec> {
 
     payload: Payload,
 
-    view_ptr: *const Codec::ResponseView,
+    view: Codec::ResponseView<'static>,
 }
 
 unsafe impl<Payload, Codec> Send for ResponseGuard<Payload, Codec>
-    where
-        Payload: AsRef<[u8]> + Send,
-        Codec: MessageCodec
+where
+    Payload: AsRef<[u8]> + Send + 'static,
+    for<'b> Codec::ResponseView<'b>: Send,
+    Codec: MessageCodec,
 {}
 
 
-impl<Payload: AsRef<[u8]> + Send, Codec: MessageCodec> ResponseGuard<Payload, Codec> {
+impl<'a, Payload: AsRef<[u8]> + Send + 'static, Codec: MessageCodec> ResponseGuard<Payload, Codec> {
     pub fn try_new(payload: Payload) -> anyhow::Result<Self> {
 
-        let data_slice = payload.as_ref();
+        let (ptr, len) = {
+            let slice = payload.as_ref();
+            (slice.as_ptr(), slice.len())
+        };
+
+        let data_slice = unsafe { std::slice::from_raw_parts(ptr, len) };
 
         let decoded = Codec::decode(data_slice)?;
 
-        let view_ref = match decoded {
-            Envelope::Response { payload, .. } => payload,
+        let view = match decoded {
+            Envelope::Response { payload: v, .. } => v,
             _ => return Err(anyhow::anyhow!("Not a response")),
         };
 
-        let view_ptr = view_ref as *const Codec::ResponseView;
+        let view_static = unsafe {
+            std::mem::transmute::<Codec::ResponseView<'_>, Codec::ResponseView<'static>>(view)
+        };
 
         Ok(Self {
             payload,
-            view_ptr,
+            view: view_static,
         })
     }
+
 }
 
-impl<Payload: AsRef<[u8]> + Send, Codec: MessageCodec> std::ops::Deref for ResponseGuard<Payload, Codec> {
-    type Target = Codec::ResponseView;
+impl<Payload: AsRef<[u8]> + Send + 'static, Codec: MessageCodec> std::ops::Deref for ResponseGuard<Payload, Codec> {
+
+    type Target = Codec::ResponseView<'static>;
 
     fn deref(&self) -> &Self::Target {
-        unsafe { &*self.view_ptr }
+        &self.view
     }
 }
 
@@ -160,7 +170,7 @@ pub struct NoOpHandler;
 impl<P: MessageCodec> ServiceHandler<P> for NoOpHandler {
     async fn on_request(
         &self,
-        _: &<P as MessageCodec>::RequestView,
+        _: <P as MessageCodec>::RequestView<'_>,
     ) -> anyhow::Result<<P as MessageCodec>::Response> {
         Err(anyhow!("no op"))
     }
