@@ -2,7 +2,6 @@ use crate::main_loop::{run_session, SessionConfig};
 use crate::message_codec::MessageCodec;
 use crate::runtime;
 use crate::transport::stream::AcceptorBuilder;
-use crate::ServiceHandler;
 use anyhow::{Context, Result};
 use std::marker::PhantomData;
 use std::rc::Rc;
@@ -10,6 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use dashmap::DashMap;
 use tracing::{error, info};
+use crate::service_handler::ServiceHandler;
 use crate::transport::base::{BufferAllocator, MessageSink, MessageSource, TopologyRegistry, Transport, TransportAcceptor, TransportPerWorkerBuilder, WorkerInitializer};
 
 pub struct ServerWorker<C: SessionConfig, H: ServiceHandler<C::Codec>> {

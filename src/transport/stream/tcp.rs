@@ -14,8 +14,8 @@ impl Acceptor for TcpListener {
 }
 
 impl Splitable for TcpStream {
-    fn split(self) -> io::Result<(Self, Self)> {
-        Ok((self.clone(), self))
+    fn split(self) -> (Self, Self) {
+        (self.clone(), self)
     }
 }
 

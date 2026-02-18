@@ -8,21 +8,16 @@ description = "A transport-agnostic RPC framework for stream and memory-based co
 keywords = ["rpc", "windows", "vsock", "linux"]
 
 [dependencies]
-rkyv = { version = "0.8.14", features = ["bytecheck", "std"] }
+
 compio = { version = "0.18.0", features = ["net", "io-compat", "process", "macros", "time"] }
 socket2 = "0.6.2"
-windows = { version = "0.61.3", features = [
-    "Win32_System_Performance",
-    "Win32_NetworkManagement", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis",
-    "Win32_Networking_WinSock", "Win32_System_Threading", "Win32_System_Hypervisor"] }
+
 
 anyhow = "1.0.100"
 tracing = { version = "0.1.44", features = ["release_max_level_warn"] }
 futures = "0.3.31"
 tracing-subscriber = "0.3.22"
 bytes = "1.11.1"
-libc = "1.0.0-alpha.2"
-dhat = { version = "0.3", optional = true }
 flume = { version = "0.12.0", features = ["async"] }
 dashmap = "6.1.0"
 affinity = "0.1.2"
@@ -30,19 +25,53 @@ num_cpus = "1.17.0"
 oneshot = "0.1.13"
 smallvec = "1.15.1"
 local-sync = "0.1.1"
-iceoryx2 = "0.8.1"
 lazy_static = "1.5.0"
-serde = { version = "1.0.228", features = ["derive"] }
 async-trait = "0.1.89"
-serde_json = "1.0.149"
-bitcode = { version = "0.6.9", features = ["serde"] }
+
+rkyv = { version = "0.8.14", features = ["bytecheck", "std"] }
+serde = { version = "1.0.228", features = ["derive"] }
+bitcode = { version = "0.6.9", features = ["serde"], optional = true }
+
+iceoryx2 = { version = "0.8.1", optional = true }
+
+dhat = { version = "0.3", optional = true }
+
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61.3", features = [
+    "Win32_System_Performance",
+    "Win32_NetworkManagement", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock", "Win32_System_Threading", "Win32_System_Hypervisor"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "1.0.0-alpha.2"
+
+[features]
+
+rkyv-codec = []
+bitcode-codec = ["dep:bitcode"]
+
+shm = ["dep:iceoryx2"]
+stream = []
+
+tcp = ["stream"]
+vsock = ["stream"]
+
+all = [
+    "rkyv-codec",
+    "bitcode-codec",
+    "shm",
+    "tcp",
+    "vsock",
+    "stream"
+]
+
+
+dhat-heap = ["dep:dhat"]
 
 [profile.release]
 debug = true
 split-debuginfo = "packed"
-
-[features]
-dhat-heap = ["dep:dhat"]
 
 [dev-dependencies]
 hdrhistogram = "7.5.4"

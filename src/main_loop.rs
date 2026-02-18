@@ -1,7 +1,6 @@
 use crate::align_buffer::AlignedBuffer;
 use crate::message_codec::{Envelope, MessageCodec};
 use crate::tpc_pool::TpcPool;
-use crate::ServiceHandler;
 use compio::buf::IoBuf;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -9,7 +8,7 @@ use std::rc::Rc;
 use dashmap::DashMap;
 use std::sync::Arc;
 use tracing::error;
-use crate::transport::base::handle::{MsgBatch, PeerSink};
+use crate::service_handler::ServiceHandler;
 use crate::transport::base::{BufferAllocator, MessageSink, MessageSource, Transport};
 
 pub trait SessionConfig {
@@ -83,7 +82,7 @@ where
         if let OnRequestAction::SendResponse { id, resp } = action {
             
             type Env<C: MessageCodec> = Envelope<C::Request, C::Response>;
-            let size_hint = std::mem::size_of::<Env<C::Codec>>();
+            let size_hint = size_of::<Env<C::Codec>>();
 
             let mut out_buf = C::Alloc::allocate(size_hint);
 

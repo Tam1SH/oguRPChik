@@ -118,7 +118,7 @@ mod tests {
 
         let client_fut = async {
             let stream = VStream::connect(1, TEST_PORT + 1).await.unwrap();
-            let (mut reader, mut writer) = stream.split().expect("Split failed");
+            let (mut reader, mut writer) = stream.split();
 
             writer.write_all(b"ping").await.0.unwrap();
             let buf = vec![0u8; 4];

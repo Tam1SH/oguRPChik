@@ -15,14 +15,14 @@ pub enum VStream {
 }
 
 impl Splitable for VStream {
-    fn split(self) -> io::Result<(Self, Self)> {
+    fn split(self) -> (Self, Self) {
         let clone = match &self {
             #[cfg(windows)]
             Self::Hv(s) => Self::Hv(s.clone()),
             #[cfg(unix)]
-            Self::Vsock(s) => Self::Vsock(s.try_clone()?),
+            Self::Vsock(s) => Self::Vsock(s.clone()),
         };
-        Ok((clone, self))
+        (clone, self)
     }
 }
 
@@ -133,7 +133,10 @@ impl VListener {
                 Ok((VStream::Hv(stream), addr))
             }
             #[cfg(unix)]
-            Self::Vsock(l) => Ok(VStream::Vsock(l.accept().await?.0)),
+            Self::Vsock(l) => {
+                let (stream, addr) = l.accept().await?;
+                Ok((VStream::Vsock(stream), addr))
+            },
         }
     }
 }

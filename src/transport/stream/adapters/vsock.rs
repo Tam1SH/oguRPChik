@@ -1,10 +1,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use crate::align_buffer::AlignedBuffer;
-use crate::transport::base::handle::{PeerSink, PeerSource};
-use crate::transport::base::stream::{GenericStreamBuilder, GenericStreamConnector};
+use crate::transport::impls::peer::handle::{PeerSink, PeerSource};
+use crate::transport::impls::peer::adapter::{GenericStreamBuilder, GenericStreamConnector};
 use crate::transport::base::TransportBuilder;
-use crate::transport::impls::peer::PeerConfig;
+use crate::transport::impls::peer::config::PeerConfig;
 use crate::transport::stream::vsock::{VsockAcceptorBuilder, VsockConnector};
 
 #[derive(Clone)]

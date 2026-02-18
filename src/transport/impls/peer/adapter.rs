@@ -4,9 +4,10 @@ use crate::transport::stream::{Acceptor, AcceptorBuilder, AsyncStream, Connector
 use std::io;
 use std::sync::Arc;
 use local_sync::mpsc;
-use crate::transport::base::handle::{PeerSink, PeerSource};
+use crate::transport::impls::peer::handle::{PeerSink, PeerSource};
 use crate::transport::base::{MessageSink, MessageSource, NoOpInitializer, TopologyRegistry, Transport, TransportAcceptor, TransportPerWorkerBuilder, TransportConnector};
-use crate::transport::impls::peer::{Peer, PeerConfig};
+use crate::transport::impls::peer::config::PeerConfig;
+use crate::transport::impls::peer::implementation::Peer;
 
 pub struct StreamTransport<S: AsyncStream> {
     pub stream: S,
@@ -20,7 +21,7 @@ impl<S: AsyncStream> Transport<PeerSink, PeerSource> for StreamTransport<S> {
 }
 
 pub struct GenericStreamAcceptor<A: Acceptor> {
-    pub(super) inner: A,
+    pub(in crate::transport) inner: A,
     config: PeerConfig,
 }
 

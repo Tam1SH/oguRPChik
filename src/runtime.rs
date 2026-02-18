@@ -25,9 +25,9 @@ pub fn init(num_cores: usize) {
         std::thread::spawn(move || {
             let _ = affinity::set_thread_affinity(&[core_id]);
 
-            if core_id == 0 {
-                set_thread_high_priority();
-            }
+            // if core_id == 0 {
+            //     set_thread_high_priority();
+            // }
 
             let runtime = compio::runtime::Runtime::new().expect("Runtime init failed");
             info!("Core {} runtime operational", core_id);

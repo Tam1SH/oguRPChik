@@ -1238,7 +1238,6 @@ dependencies = [
  "oneshot",
  "rkyv",
  "serde",
- "serde_json",
  "smallvec",
  "socket2",
  "tracing",

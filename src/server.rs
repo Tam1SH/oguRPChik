@@ -6,7 +6,8 @@ use tracing::info;
 
 use crate::message_codec::MessageCodec;
 use crate::worker::ServerWorker;
-use crate::{runtime, ServiceHandler};
+use crate::runtime;
+use crate::service_handler::ServiceHandler;
 use crate::transport::base::{BufferAllocator, MessageSink, MessageSource, TransportBuilder, TopologyRegistry, TransportPerWorkerBuilder, WorkerInitializer};
 
 

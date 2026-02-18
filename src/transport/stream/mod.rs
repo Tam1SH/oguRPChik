@@ -2,10 +2,11 @@ use std::fmt::Display;
 use compio::io::{AsyncRead, AsyncReadAt, AsyncWrite};
 use socket2::SockAddr;
 use std::io;
-use std::net::SocketAddr;
 
 pub mod adapters;
+#[cfg(feature = "tcp")]
 pub mod tcp;
+#[cfg(feature = "vsock")]
 pub mod vsock;
 
 pub trait AsyncStream: Splitable + AsyncRead + AsyncWrite + Unpin + Clone + 'static {}
@@ -13,7 +14,7 @@ pub trait AsyncStream: Splitable + AsyncRead + AsyncWrite + Unpin + Clone + 'sta
 impl<T: Splitable + AsyncRead + AsyncWrite + Unpin + Clone + 'static> AsyncStream for T {}
 
 pub trait Splitable {
-    fn split(self) -> io::Result<(Self, Self)>
+    fn split(self) -> (Self, Self)
     where
         Self: Sized;
 }

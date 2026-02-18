@@ -9,48 +9,9 @@ use compio::BufResult;
 use futures::{FutureExt, SinkExt, StreamExt};
 use std::io;
 use tracing::{debug, error, info, instrument, trace};
-use crate::transport::base::handle::{OutgoingMsg, PeerSink, PeerSource};
+use crate::transport::impls::peer::handle::{OutgoingMsg, PeerSink, PeerSource};
 use local_sync::mpsc;
-
-
-#[derive(Clone, Debug)]
-pub struct PeerConfig {
-    pub priority: Priority,
-    pub channel_size: usize,
-    pub batch_limit: usize,
-    pub read_buffer_capacity: usize,
-}
-
-impl Default for PeerConfig {
-    fn default() -> Self {
-        Self::for_priority(Priority::Normal)
-    }
-}
-
-impl PeerConfig {
-    pub fn for_priority(priority: Priority) -> Self {
-        match priority {
-            Priority::Critical => Self {
-                priority,
-                channel_size: 16,
-                batch_limit: 16,
-                read_buffer_capacity: 32 * 1024,
-            },
-            Priority::Normal => Self {
-                priority,
-                channel_size: 16,
-                batch_limit: 32,
-                read_buffer_capacity: 256 * 1024, 
-            },
-            Priority::Bulk => Self {
-                priority,
-                channel_size: 32,
-                batch_limit: 64,
-                read_buffer_capacity: 1024 * 1024, 
-            },
-        }
-    }
-}
+use crate::transport::impls::peer::config::PeerConfig;
 
 pub struct Peer;
 
@@ -62,8 +23,8 @@ impl Peer {
     ) -> io::Result<(PeerSink, PeerSource)> {
         let (outgoing_tx, outgoing_rx) = mpsc::bounded::channel(config.channel_size);
         let (incoming_tx, incoming_rx) = mpsc::bounded::channel(config.channel_size);
-        
-        let (writer, reader) = stream.split()?;
+
+        let (writer, reader) = stream.split();
 
         compio::runtime::spawn(Self::run_writer(writer, outgoing_rx, config.clone())).detach();
 
@@ -305,9 +266,9 @@ mod tests {
 
     #[compio::test]
     async fn test_peer_full_duplex_bidirectional() {
-        tracing_subscriber::fmt()
-            .with_max_level(Level::TRACE)
-            .init();
+        // tracing_subscriber::fmt()
+        //     .with_max_level(Level::TRACE)
+        //     .init();
 
         let (server_stream, client_stream) = setup_vsock_pair(8002).await;
 
