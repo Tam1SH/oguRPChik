@@ -3,6 +3,8 @@ pub mod general;
 pub mod linux;
 #[cfg(windows)]
 pub mod windows;
+#[cfg(windows)]
+pub mod utils;
 
 use std::fmt::Display;
 use crate::transport::stream::vsock::general::{VListener, VStream};
@@ -13,15 +15,23 @@ use compio::BufResult;
 use socket2::SockAddr;
 use std::io;
 use std::net::ToSocketAddrs;
+use uuid::Uuid;
+
+#[derive(Debug, Clone, Copy)]
+pub enum VsockTarget {
+    Cid(u32),
+    Guid(Uuid),
+}
+
 
 pub struct VsockConnector {
-    pub cid: u32,
+    pub target: VsockTarget,
     pub port: u32,
 }
 
 impl VsockConnector {
-    pub fn new(cid: u32, port: u32) -> Self {
-        Self { cid, port }
+    pub fn new(target: VsockTarget, port: u32) -> Self {
+        Self { target, port }
     }
 }
 
@@ -29,9 +39,7 @@ impl Connector for VsockConnector {
     type Stream = VStream;
 
     async fn connect(&self) -> io::Result<Self::Stream> {
-        VStream::connect(self.cid, self.port)
-            .await
-            .map_err(|e| e.into())
+        VStream::connect(self.target, self.port).await
     }
 }
 
@@ -44,13 +52,13 @@ impl Acceptor for VListener {
 }
 
 pub struct VsockAcceptorBuilder {
-    cid: u32,
+    pub target: VsockTarget,
     pub port: u32,
 }
 
 impl VsockAcceptorBuilder {
-    pub fn new(cid: u32, port: u32) -> Self {
-        Self { port, cid }
+    pub fn new(target: VsockTarget, port: u32) -> Self {
+        Self { port, target }
     }
 }
 
@@ -59,11 +67,14 @@ impl AcceptorBuilder for VsockAcceptorBuilder {
     type Acceptor = VListener;
 
     async fn bind(self) -> io::Result<Self::Acceptor> {
-        VListener::bind(self.port).map_err(Into::into)
+        VListener::bind(self.target, self.port)
     }
 
     fn local_addr(&self) -> io::Result<impl Display> {
-        Ok(format!("{}:{}", self.cid, self.port))
+        match self.target {
+            VsockTarget::Cid(c) => Ok(format!("{}:{}", c, self.port)),
+            VsockTarget::Guid(u) => Ok(format!("{}:{}", u, self.port)),
+        }
     }
 
     fn kind(&self) -> &'static str {
@@ -80,10 +91,10 @@ mod tests {
 
     #[compio::test]
     async fn test_stream_full_cycle() {
-        let listener = VListener::bind(TEST_PORT).expect("Failed to bind listener");
+        let listener = VListener::bind_loopback(TEST_PORT).expect("Failed to bind listener");
 
         let client_task = async {
-            let mut client = VStream::connect(1, TEST_PORT)
+            let mut client = VStream::connect_loopback(TEST_PORT)
                 .await
                 .expect("Client failed to connect");
 
@@ -114,10 +125,10 @@ mod tests {
 
     #[compio::test]
     async fn test_stream_split() {
-        let listener = VListener::bind(TEST_PORT + 1).expect("Bind failed");
+        let listener = VListener::bind_loopback(TEST_PORT + 1).expect("Bind failed");
 
         let client_fut = async {
-            let stream = VStream::connect(1, TEST_PORT + 1).await.unwrap();
+            let stream = VStream::connect_loopback(TEST_PORT + 1).await.unwrap();
             let (mut reader, mut writer) = stream.split();
 
             writer.write_all(b"ping").await.0.unwrap();

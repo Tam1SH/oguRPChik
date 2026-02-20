@@ -211,16 +211,17 @@ mod tests {
     use crate::transport::stream::vsock::general::{VListener, VStream};
     use rkyv::util::AlignedVec;
     use tracing::Level;
+    use crate::transport::stream::vsock::VsockTarget;
 
     async fn setup_vsock_pair(port: u32) -> (VStream, VStream) {
-        let listener = VListener::bind(port).expect("Vsock bind failed");
+        let listener = VListener::bind_loopback(port).expect("Vsock bind failed");
 
         let server_handle =
             compio::runtime::spawn(
                 async move { listener.accept().await.expect("Vsock accept failed") },
             );
 
-        let client_stream = VStream::connect(0, port)
+        let client_stream = VStream::connect(VsockTarget::Cid(0), port)
             .await
             .expect("Vsock connect failed");
 

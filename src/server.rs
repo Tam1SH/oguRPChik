@@ -55,6 +55,12 @@ pub fn setup() -> ServerBuilder<NoHandler, NoCodec, NoTransport, NoSink, NoSourc
 }
 
 impl<H, C, T, Si, So> ServerBuilder<H, C, T, Si, So> {
+
+    pub fn single_thread(mut self) -> Self {
+        self.cores = 1;
+        self
+    }
+
     pub fn cores(mut self, cores: usize) -> Self {
         self.cores = cores;
         self
@@ -129,20 +135,16 @@ where
             return Err(anyhow!("Registry codec mismatch"));
         }
 
-        let available_cores = runtime::core_count();
-        let cores_to_use = if available_cores == 0 {
-            self.cores
-        } else {
-            self.cores.min(available_cores)
-        };
+        runtime::init(self.cores);
+        registry.init_cores(self.cores);
 
         info!(
-            cores = cores_to_use,
+            cores = self.cores,
             payload = std::any::type_name::<C::Dest>(),
             "Starting RPC server workers"
         );
 
-        for core_id in 0..cores_to_use {
+        for core_id in 0..self.cores {
             let h = self.handler.clone();
 
             let builder = transport.server_builder();

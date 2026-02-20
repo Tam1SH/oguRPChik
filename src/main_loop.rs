@@ -82,7 +82,7 @@ where
         if let OnRequestAction::SendResponse { id, resp } = action {
             
             type Env<C: MessageCodec> = Envelope<C::Request, C::Response>;
-            let size_hint = size_of::<Env<C::Codec>>();
+            let size_hint = size_of::<Env<C::Codec>>() * 2;
 
             let mut out_buf = C::Alloc::allocate(size_hint);
 

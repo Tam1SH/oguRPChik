@@ -65,9 +65,9 @@ pub struct Endpoint {
 }
 
 pub trait TopologyRegistry: Send + Sync + 'static {
+    fn init_cores(&self, cores: usize);
     fn register(&self, core_id: usize, endpoint: String);
     fn transport_name(&self) -> &str;
-
     fn codec_name(&self) -> &str;
 }
 

@@ -4,6 +4,8 @@ use compio::io::{AsyncRead, AsyncWrite};
 use compio::BufResult;
 use socket2::SockAddr;
 use std::io;
+use tracing::{debug, error, info, instrument, trace};
+use crate::transport::stream::vsock::VsockTarget;
 
 #[derive(Clone)]
 pub enum VStream {
@@ -27,33 +29,47 @@ impl Splitable for VStream {
 }
 
 impl VStream {
-    pub async fn connect(cid: u32, port: u32) -> io::Result<Self> {
+
+    pub async fn connect_loopback(port: u32) -> io::Result<Self> {
         #[cfg(unix)]
         {
-            Ok(Self::Vsock(
-                crate::transport::stream::vsock::linux::VsockStream::connect(cid, port)
-                    .await?,
-            ))
+            Self::connect(VsockTarget::Cid(libc::VMADDR_CID_LOCAL), port).await
         }
         #[cfg(windows)]
         {
+            Self::connect(VsockTarget::Cid(1), port).await
+        }
+    }
+    pub async fn connect(target: VsockTarget, port: u32) -> io::Result<Self> {
+        #[cfg(unix)]
+        {
+            let cid = match target {
+                VsockTarget::Cid(c) => c,
+                VsockTarget::Guid(_) => return Err(io::Error::new(io::ErrorKind::InvalidInput, "UUID not supported on Unix")),
+            };
+            crate::transport::stream::vsock::linux::VsockStream::connect(cid, port).await
+                .map(Self::Vsock)
+        }
+
+        #[cfg(windows)]
+        {
             use crate::transport::stream::vsock::windows::ToServiceId;
-            let vm_guid = match cid {
-                0 | 1 => ::windows::Win32::System::Hypervisor::HV_GUID_LOOPBACK,
-                2 => ::windows::Win32::System::Hypervisor::HV_GUID_PARENT,
-                _ => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "Unsupported CID on Windows",
-                    ));
+            use crate::transport::stream::vsock::utils::uuid_to_guid;
+            let (vm_guid, service_id) = match target {
+                VsockTarget::Cid(cid) => {
+                    let g = match cid {
+                        u32::MAX => ::windows::Win32::System::Hypervisor::HV_GUID_CHILDREN,
+                        0 | 1 => ::windows::Win32::System::Hypervisor::HV_GUID_LOOPBACK,
+                        2 => ::windows::Win32::System::Hypervisor::HV_GUID_PARENT,
+                        _ => ::windows::Win32::System::Hypervisor::HV_GUID_CHILDREN,
+                    };
+                    (g, port.to_guid())
                 }
+                VsockTarget::Guid(u) => (uuid_to_guid(u), port.to_guid()),
             };
 
-            let guid = port.to_guid();
-            Ok(Self::Hv(
-                crate::transport::stream::vsock::windows::HvStream::connect(vm_guid, guid)
-                    .await?,
-            ))
+            crate::transport::stream::vsock::windows::HvStream::connect(vm_guid, service_id).await
+                .map(Self::Hv)
         }
     }
 }
@@ -110,17 +126,31 @@ pub enum VListener {
 }
 
 impl VListener {
-    pub fn bind(port: u32) -> io::Result<Self> {
+    pub fn bind(target: VsockTarget, port: u32) -> io::Result<Self> {
         #[cfg(windows)]
         {
             Ok(Self::Hv(
-                crate::transport::stream::vsock::windows::HvListener::bind(port)?,
+                crate::transport::stream::vsock::windows::HvListener::bind(target, port)?,
             ))
         }
         #[cfg(unix)]
         {
             Ok(Self::Vsock(
                 crate::transport::stream::vsock::linux::VsockListener::bind(port)?,
+            ))
+        }
+    }
+
+    pub fn bind_loopback(port: u32) -> io::Result<Self> {
+        #[cfg(windows)]
+        {
+            Ok(Self::Hv(
+                crate::transport::stream::vsock::windows::HvListener::bind(VsockTarget::Cid(0), port)?,
+            ))
+        }
+        #[cfg(unix)] {
+            Ok(Self::Vsock(
+                crate::transport::stream::vsock::linux::VsockListener::bind_loopback(port)?,
             ))
         }
     }

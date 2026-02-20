@@ -8,6 +8,7 @@ use std::io;
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
 use compio::driver::SharedFd;
+use tracing::{debug, error, instrument, trace};
 
 #[derive(Clone)]
 pub struct VsockStream {
@@ -15,20 +16,36 @@ pub struct VsockStream {
 }
 
 impl VsockStream {
+    #[instrument(level = "trace", skip_all, fields(cid = cid, port = port))]
     pub async fn connect(cid: u32, port: u32) -> io::Result<Self> {
-        let socket = Socket::new(Domain::VSOCK, Type::STREAM, None)?;
-        let addr = SockAddr::vsock(cid, port);
+        trace!("VsockStream: creating socket object");
+        let socket = Socket::new(Domain::VSOCK, Type::STREAM, None).map_err(|e| {
+            error!(error = %e, "Failed to create Socket object");
+            e
+        })?;
 
+        let addr = SockAddr::vsock(cid, port);
         let fd = SharedFd::new(OwnedFd::from(socket));
 
+        trace!("VsockStream: preparing connect operation");
         let op = Connect::new(fd.clone(), addr);
 
+        trace!("VsockStream: submitting to proactor...");
         let BufResult(res, _) = submit(op).await;
+
+        if let Err(ref e) = res {
+
+            error!(error = %e, cid, port, "VsockStream: proactor submit returned error");
+        } else {
+            debug!(cid, port, "VsockStream: proactor connect successful");
+        }
+
         res?;
 
-        Ok(Self {
-            inner: Attacher::new(fd.try_unwrap().expect("have not strong reference"))?,
-        })
+        trace!("VsockStream: attaching file descriptor");
+        let inner = Attacher::new(fd.try_unwrap().expect("have not strong reference"))?;
+
+        Ok(Self { inner })
     }
 
     pub fn from_raw(fd: i32) -> io::Result<Self> {
@@ -77,8 +94,16 @@ pub struct VsockListener {
 
 impl VsockListener {
     pub fn bind(port: u32) -> io::Result<Self> {
+        Self::bind_internal(libc::VMADDR_CID_ANY, port)
+    }
+
+    pub fn bind_loopback(port: u32) -> io::Result<Self> {
+        Self::bind_internal(libc::VMADDR_CID_LOCAL, port)
+    }
+
+    pub fn bind_internal(cid: u32, port: u32) -> io::Result<Self> {
         let socket = Socket::new(Domain::VSOCK, Type::STREAM, None)?;
-        let addr = SockAddr::vsock(libc::VMADDR_CID_ANY, port);
+        let addr = SockAddr::vsock(cid, port);
         socket.bind(&addr)?;
         socket.listen(128)?;
         Ok(Self {

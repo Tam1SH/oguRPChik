@@ -13,8 +13,10 @@ use windows::Win32::Networking::WinSock::{
     self, bind, listen, ADDRESS_FAMILY, AF_HYPERV, SOCKADDR, SOCKET_ERROR,
     SOL_SOCKET, SOMAXCONN, SO_UPDATE_ACCEPT_CONTEXT,
 };
-use windows::Win32::System::Hypervisor::{HV_GUID_ZERO, HV_PROTOCOL_RAW, SOCKADDR_HV};
+use windows::Win32::System::Hypervisor::{HV_GUID_ZERO, HV_GUID_CHILDREN, HV_PROTOCOL_RAW, HV_GUID_VSOCK_TEMPLATE, SOCKADDR_HV};
 use windows::Win32::System::Threading::GetCurrentProcess;
+use crate::transport::stream::vsock::utils::uuid_to_guid;
+use crate::transport::stream::vsock::VsockTarget;
 
 #[derive(Clone)]
 pub struct HvStream {
@@ -31,25 +33,6 @@ impl HvStream {
     pub fn from_raw(raw: u64) -> io::Result<Self> {
         let owned = unsafe { OwnedSocket::from_raw_socket(raw as _) };
         Self::from_owned(owned)
-    }
-
-    pub fn try_clone(&self) -> io::Result<Self> {
-        let raw_socket = self.inner.as_raw_socket();
-        let mut duplicated_handle = HANDLE::default();
-
-        unsafe {
-            let current_process = GetCurrentProcess();
-            DuplicateHandle(
-                current_process,
-                HANDLE(raw_socket as _),
-                current_process,
-                &mut duplicated_handle,
-                0,
-                false,
-                DUPLICATE_SAME_ACCESS,
-            )?;
-            Self::from_raw(duplicated_handle.0 as u64)
-        }
     }
 
     pub async fn connect(vm_guid: GUID, service_id: GUID) -> io::Result<Self> {
@@ -154,18 +137,19 @@ impl HvListener {
         Ok((HvStream::from_owned(accepted_owned.into())?, addr))
     }
 
-    pub fn bind<A: ToServiceId>(addr: A) -> io::Result<Self> {
+    pub fn bind(target: VsockTarget, port: u32) -> io::Result<Self> {
         let socket = create_hv_socket()?;
         let raw_fd = WinSock::SOCKET(socket.as_raw_socket() as usize);
-        let hv_addr = create_hv_sockaddr(HV_GUID_ZERO, addr.to_guid());
+
+        let vm_guid = match target {
+            VsockTarget::Cid(_) => HV_GUID_CHILDREN,
+            VsockTarget::Guid(u) => uuid_to_guid(u),
+        };
+
+        let hv_addr = create_hv_sockaddr(vm_guid, port.to_guid());
 
         unsafe {
-            if bind(
-                raw_fd,
-                &hv_addr as *const _ as *const SOCKADDR,
-                size_of::<SOCKADDR_HV>() as i32,
-            ) == SOCKET_ERROR
-            {
+            if bind(raw_fd, &hv_addr as *const _ as *const SOCKADDR, size_of::<SOCKADDR_HV>() as i32) == SOCKET_ERROR {
                 return Err(io::Error::last_os_error());
             }
             if listen(raw_fd, SOMAXCONN as i32) == SOCKET_ERROR {
@@ -173,10 +157,9 @@ impl HvListener {
             }
         }
 
-        Ok(Self {
-            inner: Attacher::new(OwnedSocket::from(socket))?,
-        })
+        Ok(Self { inner: Attacher::new(OwnedSocket::from(socket))? })
     }
+
 }
 
 fn create_hv_socket() -> io::Result<Socket> {
@@ -202,11 +185,9 @@ pub trait ToServiceId {
 
 impl ToServiceId for u32 {
     fn to_guid(&self) -> GUID {
-        GUID::from_values(
-            *self,
-            0xfacb,
-            0x11e6,
-            [0xbd, 0x58, 0x64, 0x00, 0x6a, 0x79, 0x86, 0xd3],
-        )
+        let mut guid = HV_GUID_VSOCK_TEMPLATE;
+
+        guid.data1 = *self;
+        guid
     }
 }
