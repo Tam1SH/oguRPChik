@@ -44,7 +44,7 @@ pub struct VsockTransport {
 }
 
 impl VsockTransport {
-    pub fn new(cid: u32, base_port: u32, config: PeerConfig) -> Self {
+    pub fn new(cid: u32, base_port: u32) -> Self {
 
         let resolved_id = if cid == u32::MAX {
             #[cfg(windows)]
@@ -71,7 +71,7 @@ impl VsockTransport {
         Self {
             resolved_id,
             base_port,
-            config,
+            config: PeerConfig::default(),
             port_offset: Arc::new(AtomicU32::new(0)),
         }
     }

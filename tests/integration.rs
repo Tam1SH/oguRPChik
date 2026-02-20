@@ -87,7 +87,7 @@ use super::*;
 
     #[compio::test]
     async fn test_rpc_tcp() -> anyhow::Result<()> {
-        let transport = TcpTransport::new("127.0.0.1".to_string(), PeerConfig::default());
+        let transport = TcpTransport::new("127.0.0.1".to_string());
 
         let res = rpc_call!(transport, RkyvCodec<Request, Response>, EchoHandler, Request::Ping);
 
@@ -97,7 +97,7 @@ use super::*;
 
     #[compio::test]
     async fn test_rpc_vsock() -> anyhow::Result<()> {
-        let transport = VsockTransport::new(0, 5000, PeerConfig::default());
+        let transport = VsockTransport::new(0, 5000);
 
         let res = rpc_call!(transport, RkyvCodec<Request, Response>, EchoHandler, Request::Ping);
 

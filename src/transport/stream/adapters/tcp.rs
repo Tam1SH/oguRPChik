@@ -13,10 +13,10 @@ pub struct TcpTransport {
 }
 
 impl TcpTransport {
-    pub fn new(host: String, config: PeerConfig) -> Self {
+    pub fn new(host: String) -> Self {
         Self {
             host,
-            config
+            config: PeerConfig::default(),
         }
     }
 }
