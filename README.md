@@ -19,8 +19,8 @@ However, let's be honest: I didn't extract it into a separate library for "bette
 
 ## 🚀 Features
 
-- **Transport Agnostic**: Works over TCP, VSOCK, SHM, or any other communication backend you choose to implement.
-- **Blazingly Adequate**: Uses `compio` and `rkyv` to ensure that if something is slow, it's probably not the serialization.
+- **Transport Agnostic**: Works over TCP, VSOCK, SHM, or any other communication backend you choose to implement. 
+- **Message Flexible**: Supports both data-owning (Serde) and zero-copy view formats (rkyv).
 
 ## License
 
