@@ -11,12 +11,12 @@ pub struct JsonHandshake;
 
 impl HandshakeCodec for JsonHandshake {
     type Dest = AlignedBuffer;
-    fn encode_handshake(topology: Option<&Topology>, dest: &mut AlignedBuffer) -> anyhow::Result<()> {
-        let bytes = serde_json::to_vec(&topology)?;
+    fn encode_handshake(topology: &Topology, dest: &mut AlignedBuffer) -> anyhow::Result<()> {
+        let bytes = serde_json::to_vec(topology)?;
         dest.0.extend_from_slice(&bytes);
         Ok(())
     }
-    fn decode_handshake(data: &[u8]) -> anyhow::Result<Option<Topology>> {
+    fn decode_handshake(data: &[u8]) -> anyhow::Result<Topology> {
         Ok(serde_json::from_slice(data)?)
     }
 }

@@ -76,7 +76,7 @@ use super::*;
 
             let topology = registry.ready().await;
 
-            let (client, _) = Client::<$protocol, _>::connect(transport, topology, None)
+            let (client, _) = Client::<$protocol, _>::connect(transport, topology)
                 .await
                 .expect("Failed to connect client");
 

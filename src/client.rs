@@ -53,7 +53,7 @@ where
             expected_codec = %C::kind()
         )
     )]
-    pub async fn connect<T>(transport: T, topology: Topology, my_topology: Option<Topology>) -> Result<(Self, Option<Topology>)>
+    pub async fn connect<T>(transport: T, topology: Topology) -> Result<(Self, Option<Topology>)>
     where
         T: TransportBuilder<P>,
     {
@@ -104,7 +104,7 @@ where
 
         info!("All connectors prepared, initiating connect_internal");
 
-        match Self::connect_internal(connectors, num_cores, my_topology).await {
+        match Self::connect_internal(connectors, num_cores, topology).await {
             Ok(client) => {
                 info!("Client successfully connected to all cores");
                 Ok(client)
@@ -119,7 +119,7 @@ where
     async fn connect_internal<Conn, Si, So>(
         connectors: Vec<Conn>,
         num_cores: usize,
-        topology: Option<Topology>,
+        topology: Topology,
     ) -> Result<(Self, Option<Topology>)>
     where
         Si: MessageSink<Payload = C::Dest> + Clone + 'static,
@@ -129,7 +129,7 @@ where
         runtime::init(num_cores);
 
         let mut workers = Vec::with_capacity(num_cores);
-        let (init_tx, init_rx) = flume::bounded::<Result<(usize, Option<Topology>)>>(num_cores);
+        let (init_tx, init_rx) = flume::bounded::<Result<(usize, Topology)>>(num_cores);
 
         for (core_id, connector) in connectors.into_iter().enumerate() {
             let (worker_tx, worker_rx) = flume::unbounded::<CallRequest<C, P>>();
@@ -168,7 +168,7 @@ where
             peer_topologies.push(topology);
         }
 
-        let peer_topology = peer_topologies.into_iter().flatten().next();
+        let peer_topology = peer_topologies.into_iter().next();
 
         info!(num_workers = workers.len(), "Client pool initialized");
 

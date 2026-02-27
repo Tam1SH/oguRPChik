@@ -9,8 +9,8 @@ pub enum Envelope<Req, Res> {
 
 pub trait HandshakeCodec {
     type Dest: Default;
-    fn encode_handshake(topology: Option<&Topology>, dest: &mut Self::Dest) -> Result<()>;
-    fn decode_handshake(data: &[u8]) -> Result<Option<Topology>>;
+    fn encode_handshake(topology: &Topology, dest: &mut Self::Dest) -> Result<()>;
+    fn decode_handshake(data: &[u8]) -> Result<Topology>;
 }
 
 pub trait MessageCodec: Send + Sync + 'static {

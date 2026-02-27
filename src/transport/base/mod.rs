@@ -27,7 +27,7 @@ pub trait RawMessageSource: 'static {
 }
 
 pub trait MessageSink: Clone + 'static {
-    
+
     type Payload: 'static;
 
     async fn send(&self, data: Self::Payload) -> anyhow::Result<()>;

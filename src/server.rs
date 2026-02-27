@@ -41,7 +41,7 @@ pub struct ServerBuilder<H, C, T, Si, So> {
     transport: Option<T>,
     registry: Option<Arc<dyn TopologyRegistry>>,
     topology: Option<Topology>,
-    peer_tx: Option<flume::Sender<Option<Topology>>>,
+    peer_tx: Option<flume::Sender<Topology>>,
     _phantom: PhantomData<(C, Si, So)>,
 }
 
@@ -63,7 +63,7 @@ impl<H, C, T, Si, So> ServerBuilder<H, C, T, Si, So> {
         self.cores = 1;
         self
     }
-    pub fn on_peer(self, tx: flume::Sender<Option<Topology>>) -> Self {
+    pub fn on_peer(self, tx: flume::Sender<Topology>) -> Self {
         Self { peer_tx: Some(tx), ..self }
     }
     pub fn cores(mut self, cores: usize) -> Self {

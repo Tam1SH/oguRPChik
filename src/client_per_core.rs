@@ -60,14 +60,14 @@ where
 
     pub async fn connect<T: Transport<Si, So>>(
         transport: T,
-        my_topology: Option<Topology>,
-    ) -> anyhow::Result<(Self, Option<Topology>)> {
+        topology: Topology
+    ) -> anyhow::Result<(Self, Topology)> {
 
         let (sink, mut source) = transport.decompose()?;
 
         let mut buf = Default::default();
 
-        C::Handshake::encode_handshake(my_topology.as_ref(), &mut buf)?;
+        C::Handshake::encode_handshake(&topology, &mut buf)?;
 
         info!("sending handshake");
         match sink.send(buf).await {
@@ -83,7 +83,6 @@ where
             }
             None => { error!("connection closed during handshake"); return Err(anyhow::anyhow!("closed during handshake")); }
         };
-        info!("handshake complete, peer_topology: {}", peer_topology.is_some());
 
         let pending = Rc::new(DashMap::new());
         let p_clone = pending.clone();

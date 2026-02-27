@@ -24,7 +24,7 @@ impl<C: SessionConfig + 'static, H: ServiceHandler<C::Codec> + Clone + Send + 's
         builder: B,
         handler: H,
         registry: Option<Arc<dyn TopologyRegistry>>,
-        peer_tx: Option<flume::Sender<Option<Topology>>>,
+        peer_tx: Option<flume::Sender<Topology>>,
         topology: Option<Topology>,
     ) -> Result<()>
     where
@@ -74,11 +74,14 @@ impl<C: SessionConfig + 'static, H: ServiceHandler<C::Codec> + Clone + Send + 's
                             };
 
                             let mut buf = Default::default();
-                            match <<C as SessionConfig>::Codec as MessageCodec>::Handshake::encode_handshake(topology.as_ref(), &mut buf) {
-                                Ok(_) => { let _ = sink.send(buf).await; }
-                                Err(e) => { error!("Handshake encode error: {e}"); return; }
+                            
+                            if let Some(topology) = topology {
+                                match <<C as SessionConfig>::Codec as MessageCodec>::Handshake::encode_handshake(&topology, &mut buf) {
+                                    Ok(_) => { let _ = sink.send(buf).await; }
+                                    Err(e) => { error!("Handshake encode error: {e}"); return; }
+                                }
                             }
-
+                            
                             if let Some(tx) = &peer_tx {
                                 let _ = tx.send_async(peer_topology).await;
                             }
