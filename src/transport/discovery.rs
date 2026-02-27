@@ -22,6 +22,17 @@ pub struct Topology {
     pub map: HashMap<usize, String>,
 }
 
+pub trait ToStaticTopology {
+    fn to(&self) -> Topology;
+}
+
+impl Topology {
+    pub fn from_static(from: &impl ToStaticTopology) -> Self {
+        from.to()
+    }
+}
+
+
 impl RpcTopologyRegistry {
     pub fn new(transport_kind: String, codec_kind: String) -> Arc<Self> {
         let (tx, rx) = oneshot::channel();
