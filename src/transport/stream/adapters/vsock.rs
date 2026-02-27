@@ -44,7 +44,17 @@ pub struct VsockTransport {
 }
 
 impl VsockTransport {
-    pub fn new(cid: u32, base_port: u32) -> Self {
+    pub fn server(cid: u32, base_port: u32) -> Self {
+        Self::new(cid, Some(base_port))
+    }
+
+    pub fn client(cid: u32) -> Self {
+        Self::new(cid, None)
+    }
+
+    fn new(cid: u32, base_port: Option<u32>) -> Self {
+
+        let base_port = base_port.unwrap_or(0);
 
         let resolved_id = if cid == u32::MAX {
             #[cfg(windows)]
@@ -98,6 +108,7 @@ impl TransportBuilder<AlignedBuffer> for VsockTransport {
 
     #[instrument(skip(self), fields(cid = ?self.resolved_id, base_port = self.base_port))]
     fn server_builder(&self) -> Self::Builder {
+        assert!(self.base_port > 0, "server_builder() called on client-side VsockTransport");
         let offset = self.port_offset.fetch_add(1, Ordering::SeqCst);
         let port = self.base_port + offset;
 

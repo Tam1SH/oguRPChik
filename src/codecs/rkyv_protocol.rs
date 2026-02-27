@@ -1,21 +1,23 @@
 use crate::align_buffer::AlignedBuffer;
-use crate::message_codec::{Envelope, MessageCodec};
+use crate::message_codec::{Envelope, HandshakeCodec, MessageCodec};
 use anyhow::Result;
 use rkyv::api::high::{to_bytes_in, HighSerializer, HighValidator};
 use rkyv::bytecheck::CheckBytes;
 use rkyv::rancor::Error;
 use rkyv::ser::allocator::ArenaHandle;
 use rkyv::util::AlignedVec;
-use rkyv::{access, Archive, Serialize};
+use rkyv::{access, deserialize, Archive, Serialize};
+use crate::codecs::JsonHandshake;
 use crate::server::{DefaultVecAlloc, HasDefaultAllocator};
 use crate::tpc_pool::TpcPool;
 use crate::transport::base::BufferAllocator;
+use crate::transport::discovery::Topology;
 
 #[derive(Archive, Serialize)]
 pub(crate) enum RkyvEnvelope<Req, Res> {
     Request { id: u64, payload: Req },
     Response { id: u64, payload: Res },
-    Push { payload: Req },
+    Event { payload: Req },
 }
 
 pub trait SerializeBounds:
@@ -51,6 +53,7 @@ pub struct RkyvCodec<Req, Res> {
     _phantom: std::marker::PhantomData<(Req, Res)>,
 }
 
+
 impl<Req, Res> MessageCodec for RkyvCodec<Req, Res>
 where
     Req: SerializeBounds,
@@ -68,6 +71,7 @@ where
     type ResponseView<'a> = &'a Res::Archived;
 
     type Dest = AlignedBuffer;
+    type Handshake = JsonHandshake;
 
     fn decode(data: &[u8]) -> Result<Envelope<Self::RequestView<'_>, Self::ResponseView<'_>>> {
         let archived = access::<ArchivedRkyvEnvelope<Req, Res>, Error>(data)?;
@@ -81,7 +85,7 @@ where
                 id: u64::from(*id),
                 payload,
             }),
-            ArchivedRkyvEnvelope::Push { payload } => Ok(Envelope::Push { payload }),
+            ArchivedRkyvEnvelope::Event { payload } => Ok(Envelope::Event { payload }),
         }
     }
 
@@ -94,7 +98,7 @@ where
         let envelope = match msg {
             Envelope::Request { id, payload } => RkyvEnvelope::Request { id, payload },
             Envelope::Response { id, payload } => RkyvEnvelope::Response { id, payload },
-            Envelope::Push { payload } => RkyvEnvelope::Push { payload },
+            Envelope::Event { payload } => RkyvEnvelope::Event { payload },
         };
 
         let writer = std::mem::take(&mut dest.0);

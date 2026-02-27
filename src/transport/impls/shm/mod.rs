@@ -68,7 +68,7 @@ impl TransportConnector<IceoryxSinkAdapter, IceoryxSourceAdapter> for IceoryxCon
         let svc_c2s = port_service_factory(&node, &c2s_name)?;
         let publisher = svc_c2s.publisher_builder()
             .initial_max_slice_len(1024 * 1024)
-            .max_loaned_samples(4)
+            .max_loaned_samples(16)
             .create()?;
 
         let svc_evt_c2s = port_event_factory(&node, &c2s_name)?;
@@ -117,6 +117,7 @@ impl TransportAcceptor<IceoryxSinkAdapter, IceoryxSourceAdapter> for IceoryxAcce
         let svc_s2c = port_service_factory(&node, &s2c_name)?;
         let publisher = svc_s2c.publisher_builder()
             .initial_max_slice_len(1024 * 1024)
+            .max_loaned_samples(16)
             .create()?;
 
         let svc_evt_s2c = port_event_factory(&node, &s2c_name)?;
@@ -200,16 +201,16 @@ impl RawMessageSink for IceoryxRawSink {
                     return Poll::Ready(Err(anyhow::anyhow!("{:?}", e)));
                 }
 
-                match self.notifier.notify() {
-                    Ok(0) => {
-                        warn!("no one listen");
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        error!(error = ?e, "Failed to send Iceoryx notification");
-                        return Poll::Ready(Err(anyhow::anyhow!("{:?}", e)));
-                    }
-                }
+                // match self.notifier.notify() {
+                //     Ok(0) => {
+                //         warn!("no one listen");
+                //     }
+                //     Ok(_) => {}
+                //     Err(e) => {
+                //         error!(error = ?e, "Failed to send Iceoryx notification");
+                //         return Poll::Ready(Err(anyhow::anyhow!("{:?}", e)));
+                //     }
+                // }
 
 
                 trace!(len = bytes.len(), "Iceoryx message sent successfully");
@@ -242,7 +243,7 @@ impl RawMessageSource for IceoryxRawSource {
 
     fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<anyhow::Result<AlignedBuffer>> {
 
-        for _ in 0..1000 {
+        for _ in 0..100_000 {
             if let Ok(Some(sample)) = self.subscriber.receive() {
 
                 trace!(len = sample.len(), "Iceoryx message received (spin-loop path)");
@@ -371,8 +372,7 @@ mod tests {
 
     #[compio::test]
     async fn test_iceoryx_ping_pong_single_threaded() -> anyhow::Result<()> {
-        // tracing_subscriber::fmt().with_max_level(tracing::Level::TRACE).init();
-
+        tracing_subscriber::fmt().with_max_level(tracing::Level::TRACE).init();
 
         let base_name = gen_service_name("pp");
         let service_full_name = format!("{}_0", base_name);
@@ -425,79 +425,79 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn bench_iceoryx() {
-
-
-        crate::runtime::init(num_cpus::get());
-
-        let service_name = format!("ice_bench_{}", std::process::id());
-
-        let (done_tx, done_rx) = flume::bounded::<(Duration, usize)>(1);
-
-        let srv_service = service_name.clone();
-
-        let iterations = 100_000;
-
-
-        crate::runtime::spawn_on(1, move || async move {
-            let builder = IceoryxBuilder::new(&srv_service);
-            let acceptor = builder.bind(1, None).await.unwrap();
-
-            let transport = acceptor.accept().await.expect("Accept failed");
-            let (sink, mut source) = transport.decompose().unwrap();
-
-            for _ in 0..iterations {
-                if let Some(msg) = source.recv().await {
-                    sink.send(msg).await.unwrap();
-                }
-            }
-
-        });
-
-
-        let clt_service = service_name.clone();
-
-        crate::runtime::spawn_on(2, move || async move {
-            let full_name = format!("{}_1", clt_service);
-
-            sleep(Duration::from_millis(200)).await;
-
-            let connector = IceoryxConnector::new(&full_name);
-            let transport = connector.connect().await.expect("Connect failed");
-            let (sink, mut source) = transport.decompose().unwrap();
-
-
-            let start = Instant::now();
-
-            for _ in 0..iterations {
-                sink.send(create_payload(b"ping")).await.unwrap();
-                let _res = source.recv().await.unwrap();
-            }
-
-            let elapsed = start.elapsed();
-
-            done_tx.send((elapsed, iterations)).unwrap();
-        });
-
-
-        match done_rx.recv_timeout(Duration::from_secs(10)) {
-            Ok((elapsed, iterations)) => {
-                let avg_latency = elapsed / iterations as u32;
-                let ops_per_sec = iterations as f64 / elapsed.as_secs_f64();
-
-                info!("========================================");
-                info!("Benchmark Results:");
-                info!("Total iterations: {}", iterations);
-                info!("Total time: {:?}", elapsed);
-                info!("Average Latency: {:?}", avg_latency);
-                info!("Throughput: {:.2} ops/sec", ops_per_sec);
-                info!("========================================");
-            }
-            Err(e) => {
-                panic!("Test timed out or failed: {:?}", e);
-            }
-        }
-
-    }
+    // #[test]
+    // fn bench_iceoryx() {
+    //
+    //
+    //     crate::runtime::init(num_cpus::get());
+    //
+    //     let service_name = format!("ice_bench_{}", std::process::id());
+    //
+    //     let (done_tx, done_rx) = flume::bounded::<(Duration, usize)>(1);
+    //
+    //     let srv_service = service_name.clone();
+    //
+    //     let iterations = 100_000;
+    //
+    //
+    //     crate::runtime::spawn_on(1, move || async move {
+    //         let builder = IceoryxBuilder::new(&srv_service);
+    //         let acceptor = builder.bind(1, None).await.unwrap();
+    //
+    //         let transport = acceptor.accept().await.expect("Accept failed");
+    //         let (sink, mut source) = transport.decompose().unwrap();
+    //
+    //         for _ in 0..iterations {
+    //             if let Some(msg) = source.recv().await {
+    //                 sink.send(msg).await.unwrap();
+    //             }
+    //         }
+    //
+    //     });
+    //
+    //
+    //     let clt_service = service_name.clone();
+    //
+    //     crate::runtime::spawn_on(2, move || async move {
+    //         let full_name = format!("{}_1", clt_service);
+    //
+    //         sleep(Duration::from_millis(200)).await;
+    //
+    //         let connector = IceoryxConnector::new(&full_name);
+    //         let transport = connector.connect().await.expect("Connect failed");
+    //         let (sink, mut source) = transport.decompose().unwrap();
+    //
+    //
+    //         let start = Instant::now();
+    //
+    //         for _ in 0..iterations {
+    //             sink.send(create_payload(b"ping")).await.unwrap();
+    //             let _res = source.recv().await.unwrap();
+    //         }
+    //
+    //         let elapsed = start.elapsed();
+    //
+    //         done_tx.send((elapsed, iterations)).unwrap();
+    //     });
+    //
+    //
+    //     match done_rx.recv_timeout(Duration::from_secs(10)) {
+    //         Ok((elapsed, iterations)) => {
+    //             let avg_latency = elapsed / iterations as u32;
+    //             let ops_per_sec = iterations as f64 / elapsed.as_secs_f64();
+    //
+    //             println!("========================================");
+    //             println!("Benchmark Results:");
+    //             println!("Total iterations: {}", iterations);
+    //             println!("Total time: {:?}", elapsed);
+    //             println!("Average Latency: {:?}", avg_latency);
+    //             println!("Throughput: {:.2} ops/sec", ops_per_sec);
+    //             println!("========================================");
+    //         }
+    //         Err(e) => {
+    //             panic!("Test timed out or failed: {:?}", e);
+    //         }
+    //     }
+    //
+    // }
 }

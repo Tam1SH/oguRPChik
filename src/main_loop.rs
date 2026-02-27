@@ -1,5 +1,5 @@
 use crate::align_buffer::AlignedBuffer;
-use crate::message_codec::{Envelope, MessageCodec};
+use crate::message_codec::{Envelope, HandshakeCodec, MessageCodec};
 use crate::tpc_pool::TpcPool;
 use compio::buf::IoBuf;
 use std::collections::HashMap;
@@ -7,13 +7,14 @@ use std::rc::Rc;
 
 use dashmap::DashMap;
 use std::sync::Arc;
-use tracing::error;
+use tracing::{error, info};
 use crate::service_handler::ServiceHandler;
 use crate::transport::base::{BufferAllocator, MessageSink, MessageSource, Transport};
+use crate::transport::discovery::Topology;
 
 pub trait SessionConfig {
     type Codec: MessageCodec<Dest = Self::Payload>;
-    type Payload: AsRef<[u8]> + 'static;
+    type Payload: AsRef<[u8]> + Default + 'static;
     type Alloc: BufferAllocator<Payload = Self::Payload>;
 }
 
@@ -21,7 +22,7 @@ impl<P, A, Pay> SessionConfig for (P, A)
 where
     P: MessageCodec<Dest = Pay>,
     A: BufferAllocator<Payload = Pay>,
-    Pay: AsRef<[u8]> + 'static,
+    Pay: AsRef<[u8]> + 'static + Default,
 {
     type Codec = P;
     type Payload = Pay;
@@ -38,12 +39,14 @@ where
     C: SessionConfig,
     H: ServiceHandler<C::Codec>,
     Sink: MessageSink<Payload = C::Payload>,
-    Source: MessageSource<Payload = C::Payload>,
+    Source: MessageSource<Payload = C::Payload>
 {
     enum OnRequestAction<C: SessionConfig> {
         SendResponse { id: u64, resp: <<C as SessionConfig>::Codec as MessageCodec>::Response },
         DoNothing,
     }
+
+    info!("entering main loop");
 
     while let Some(raw) = source.recv().await {
         
@@ -67,7 +70,7 @@ where
                     Err(_) => OnRequestAction::<C>::DoNothing,
                 }
             }
-            Ok(Envelope::Push { payload }) => {
+            Ok(Envelope::Event { payload }) => {
                 let _ = handler.on_request(payload).await;
                 OnRequestAction::DoNothing
             }

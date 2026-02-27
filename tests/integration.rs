@@ -76,7 +76,7 @@ use super::*;
 
             let topology = registry.ready().await;
 
-            let client = Client::<$protocol, _>::connect(transport, topology)
+            let (client, _) = Client::<$protocol, _>::connect(transport, topology, None)
                 .await
                 .expect("Failed to connect client");
 
@@ -87,6 +87,9 @@ use super::*;
 
     #[compio::test]
     async fn test_rpc_tcp() -> anyhow::Result<()> {
+        let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .try_init();
         let transport = TcpTransport::new("127.0.0.1".to_string());
 
         let res = rpc_call!(transport, RkyvCodec<Request, Response>, EchoHandler, Request::Ping);
@@ -97,7 +100,7 @@ use super::*;
 
     #[compio::test]
     async fn test_rpc_vsock() -> anyhow::Result<()> {
-        let transport = VsockTransport::new(0, 5000);
+        let transport = VsockTransport::server(0, 5000);
 
         let res = rpc_call!(transport, RkyvCodec<Request, Response>, EchoHandler, Request::Ping);
 

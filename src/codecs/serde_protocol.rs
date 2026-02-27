@@ -2,13 +2,14 @@ use std::marker::PhantomData;
 use serde::{Deserialize, Serialize};
 use crate::message_codec::{Envelope, MessageCodec};
 use crate::align_buffer::AlignedBuffer;
+use crate::codecs::JsonHandshake;
 use crate::codecs::serde_compatible::serde_format::SerdeFormat;
 
 #[derive(Serialize, Deserialize)]
 enum WireEnvelope<Req, Res> {
     Request { id: u64, payload: Req },
     Response { id: u64, payload: Res },
-    Push { payload: Req },
+    Event { payload: Req },
 }
 
 pub struct SerdeProtocol<Req, Res, F> {
@@ -28,6 +29,7 @@ where
     type ResponseView<'a> = Res;
 
     type Dest = AlignedBuffer;
+    type Handshake = JsonHandshake;
 
     fn decode(data: &[u8]) -> anyhow::Result<Envelope<Self::RequestView<'_>, Self::ResponseView<'_>>> {
         let wire: WireEnvelope<Req, Res> = F::deserialize(data)?;
@@ -35,7 +37,7 @@ where
         match wire {
             WireEnvelope::Request { id, payload } => Ok(Envelope::Request { id, payload }),
             WireEnvelope::Response { id, payload } => Ok(Envelope::Response { id, payload }),
-            WireEnvelope::Push { payload } => Ok(Envelope::Push { payload }),
+            WireEnvelope::Event { payload } => Ok(Envelope::Event { payload }),
         }
     }
 
@@ -45,7 +47,7 @@ where
         let wire = match msg {
             Envelope::Request { id, payload } => WireEnvelope::Request { id, payload },
             Envelope::Response { id, payload } => WireEnvelope::Response { id, payload },
-            Envelope::Push { payload } => WireEnvelope::Push { payload },
+            Envelope::Event { payload } => WireEnvelope::Event { payload },
         };
 
         F::serialize(&wire, &mut dest.0)

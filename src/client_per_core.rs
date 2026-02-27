@@ -1,14 +1,15 @@
 use crate::main_loop::run_session;
-use crate::message_codec::{MessageCodec, Envelope};
+use crate::message_codec::{MessageCodec, Envelope, HandshakeCodec};
 use anyhow::anyhow;
 use dashmap::DashMap;
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+use tracing::{error, info};
 use crate::service_handler::ServiceHandler;
 use crate::transport::base::{BufferAllocator, MessageSink, MessageSource, Transport};
-
+use crate::transport::discovery::Topology;
 
 pub struct ClientPerCore<C, Si, So, A>
 where
@@ -57,25 +58,52 @@ where
     }
 
 
-    pub async fn connect<T: Transport<Si, So>>(transport: T) -> anyhow::Result<Self> {
-        let (sink, source) = transport.decompose()?;
-        let pending = Rc::new(DashMap::new());
+    pub async fn connect<T: Transport<Si, So>>(
+        transport: T,
+        my_topology: Option<Topology>,
+    ) -> anyhow::Result<(Self, Option<Topology>)> {
 
-        let cloned_sink = sink.clone();
+        let (sink, mut source) = transport.decompose()?;
+
+        let mut buf = Default::default();
+
+        C::Handshake::encode_handshake(my_topology.as_ref(), &mut buf)?;
+
+        info!("sending handshake");
+        match sink.send(buf).await {
+            Ok(_) => info!("handshake sent"),
+            Err(e) => { error!("failed to send handshake: {e}"); return Err(anyhow::anyhow!("handshake send failed")); }
+        }
+
+        info!("waiting for server handshake");
+        let peer_topology = match source.recv().await {
+            Some(raw) => {
+                info!("got server handshake, {} bytes", raw.as_ref().len());
+                C::Handshake::decode_handshake(raw.as_ref())?
+            }
+            None => { error!("connection closed during handshake"); return Err(anyhow::anyhow!("closed during handshake")); }
+        };
+        info!("handshake complete, peer_topology: {}", peer_topology.is_some());
+
+        let pending = Rc::new(DashMap::new());
         let p_clone = pending.clone();
+        let sink_clone = sink.clone();
 
         compio::runtime::spawn(async move {
-            run_session::<(C, A), _, _, _>(NoOpHandler, cloned_sink, source, p_clone).await;
-        })
-        .detach();
+            run_session::<(C, A), _, _, _>(
+                NoOpHandler,
+                sink_clone,
+                source,
+                p_clone
+            ).await;
+        }).detach();
 
-        Ok(Self {
-            sink,
-            pending,
-            next_id: Rc::new(AtomicU64::new(0)),
-            _phantom: PhantomData,
-        })
+        Ok((
+            Self { sink, pending, next_id: Rc::new(AtomicU64::new(0)), _phantom: PhantomData },
+            peer_topology,
+        ))
     }
+
 
     pub async fn call(&mut self, req: C::Request) -> anyhow::Result<ResponseGuard<C::Dest, C>> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
