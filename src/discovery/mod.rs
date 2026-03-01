@@ -8,7 +8,7 @@ use crate::transport::base::TopologyRegistry;
 
 pub mod kv;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct Topology {
     pub transport_kind: String,
     pub codec_kind: String,

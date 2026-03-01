@@ -1,11 +1,7 @@
 #[cfg(feature = "all")]
 #[cfg(test)]
 mod tests {
-    use ogurpchik::discovery::{RpcTopologyRegistry, RpcTopologyRegistryBuilder};
-use ogurpchik::codecs::base::MessageCodec;
-use super::*;
-    use ogurpchik::server::{setup, HasDefaultAllocator};
-    use ogurpchik::client::{Client, Priority};
+
     use ogurpchik::transport::stream::adapters::tcp::TcpTransport;
     use std::ops::Deref;
     use std::time::Duration;
@@ -18,7 +14,7 @@ use super::*;
     use ogurpchik::transport::impls::peer::config::PeerConfig;
     use ogurpchik::transport::stream::adapters::shm::ShmTransport;
     use ogurpchik::transport::stream::adapters::vsock::VsockTransport;
-
+    use ogurpchik::node::Node;
 
     #[derive(Archive, Deserialize, Serialize, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
     #[rkyv(compare(PartialEq), derive(Debug, PartialEq, Eq))]
@@ -55,32 +51,13 @@ use super::*;
     macro_rules! rpc_call {
         ($transport:expr, $protocol:ty, $handler:expr, $request:expr) => {{
             let transport = $transport;
-            
-            let codec_name = <$protocol>::kind();
-            let registry = RpcTopologyRegistry::builder(transport.kind(), codec_name.to_string())
-                .build().unwrap();
 
-            let srv_reg = registry.clone();
-            let srv_trans = transport.clone();
-            let srv_handler = $handler.clone();
-
-            compio::runtime::spawn(async move {
-                let Err(e) = setup()
-                    .with_transport(srv_trans)
-                    .with_registry(srv_reg)
-                    .single_thread()
-                    .service::<_, $protocol>(srv_handler)
-                    .run()
-                    .await;
-
-                panic!("server error {}", e);
-            }).detach();
-
-            let (topology, _registration_guard) = registry.ready().await;
-
-            let client = Client::<$protocol, _>::connect(transport, topology)
+            let (client, _guard) = Node::new()?
+                .serve::<$protocol, _, _>(transport.clone(), $handler.clone())
+                .connect::<$protocol, _>(transport)
+                .start()
                 .await
-                .expect("Failed to connect client");
+                .expect("Node start failed");
 
             client.call($request).await.expect("Call failed")
         }};
