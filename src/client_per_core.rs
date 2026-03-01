@@ -1,5 +1,5 @@
 use crate::main_loop::run_session;
-use crate::message_codec::{MessageCodec, Envelope, HandshakeCodec};
+use crate::codecs::base::{MessageCodec, Envelope};
 use anyhow::anyhow;
 use dashmap::DashMap;
 use std::marker::PhantomData;
@@ -7,9 +7,9 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tracing::{error, info};
+use crate::discovery::Topology;
 use crate::service_handler::ServiceHandler;
 use crate::transport::base::{BufferAllocator, MessageSink, MessageSource, Transport};
-use crate::transport::discovery::Topology;
 
 pub struct ClientPerCore<C, Si, So, A>
 where
@@ -60,29 +60,9 @@ where
 
     pub async fn connect<T: Transport<Si, So>>(
         transport: T,
-        topology: Topology
-    ) -> anyhow::Result<(Self, Topology)> {
+    ) -> anyhow::Result<Self> {
 
-        let (sink, mut source) = transport.decompose()?;
-
-        let mut buf = Default::default();
-
-        C::Handshake::encode_handshake(&topology, &mut buf)?;
-
-        info!("sending handshake");
-        match sink.send(buf).await {
-            Ok(_) => info!("handshake sent"),
-            Err(e) => { error!("failed to send handshake: {e}"); return Err(anyhow::anyhow!("handshake send failed")); }
-        }
-
-        info!("waiting for server handshake");
-        let peer_topology = match source.recv().await {
-            Some(raw) => {
-                info!("got server handshake, {} bytes", raw.as_ref().len());
-                C::Handshake::decode_handshake(raw.as_ref())?
-            }
-            None => { error!("connection closed during handshake"); return Err(anyhow::anyhow!("closed during handshake")); }
-        };
+        let (sink, source) = transport.decompose()?;
 
         let pending = Rc::new(DashMap::new());
         let p_clone = pending.clone();
@@ -97,10 +77,7 @@ where
             ).await;
         }).detach();
 
-        Ok((
-            Self { sink, pending, next_id: Rc::new(AtomicU64::new(0)), _phantom: PhantomData },
-            peer_topology,
-        ))
+        Ok(Self { sink, pending, next_id: Rc::new(AtomicU64::new(0)), _phantom: PhantomData })
     }
 
 
@@ -137,7 +114,8 @@ where
 
 pub struct ResponseGuard<Payload: AsRef<[u8]> + Send + 'static, Codec: MessageCodec> {
 
-    payload: Payload,
+    #[allow(unused)]
+    payload_guard: Payload,
 
     view: Codec::ResponseView<'static>,
 }
@@ -172,7 +150,7 @@ impl<'a, Payload: AsRef<[u8]> + Send + 'static, Codec: MessageCodec> ResponseGua
         };
 
         Ok(Self {
-            payload,
+            payload_guard: payload,
             view: view_static,
         })
     }

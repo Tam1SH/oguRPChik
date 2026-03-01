@@ -1,7 +1,8 @@
 #[cfg(feature = "all")]
 #[cfg(test)]
 mod tests {
-    use ogurpchik::message_codec::MessageCodec;
+    use ogurpchik::discovery::{RpcTopologyRegistry, RpcTopologyRegistryBuilder};
+use ogurpchik::codecs::base::MessageCodec;
 use super::*;
     use ogurpchik::server::{setup, HasDefaultAllocator};
     use ogurpchik::client::{Client, Priority};
@@ -17,7 +18,7 @@ use super::*;
     use ogurpchik::transport::impls::peer::config::PeerConfig;
     use ogurpchik::transport::stream::adapters::shm::ShmTransport;
     use ogurpchik::transport::stream::adapters::vsock::VsockTransport;
-    use ogurpchik::transport::discovery::RpcTopologyRegistry;
+
 
     #[derive(Archive, Deserialize, Serialize, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
     #[rkyv(compare(PartialEq), derive(Debug, PartialEq, Eq))]
@@ -56,7 +57,8 @@ use super::*;
             let transport = $transport;
             
             let codec_name = <$protocol>::kind();
-            let registry = RpcTopologyRegistry::new(transport.kind(), codec_name.to_string());
+            let registry = RpcTopologyRegistry::builder(transport.kind(), codec_name.to_string())
+                .build().unwrap();
 
             let srv_reg = registry.clone();
             let srv_trans = transport.clone();
@@ -74,9 +76,9 @@ use super::*;
                 panic!("server error {}", e);
             }).detach();
 
-            let topology = registry.ready().await;
+            let (topology, _registration_guard) = registry.ready().await;
 
-            let (client, _) = Client::<$protocol, _>::connect(transport, topology)
+            let client = Client::<$protocol, _>::connect(transport, topology)
                 .await
                 .expect("Failed to connect client");
 
@@ -88,7 +90,7 @@ use super::*;
     #[compio::test]
     async fn test_rpc_tcp() -> anyhow::Result<()> {
         let _ = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
+        .with_max_level(tracing::Level::TRACE)
         .try_init();
         let transport = TcpTransport::new("127.0.0.1".to_string());
 

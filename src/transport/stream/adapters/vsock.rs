@@ -95,7 +95,6 @@ impl VsockTransport {
 
 }
 
-
 impl TransportBuilder<AlignedBuffer> for VsockTransport {
     type Si = PeerSink;
     type So = PeerSource;

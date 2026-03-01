@@ -1,5 +1,5 @@
 use crate::align_buffer::AlignedBuffer;
-use crate::message_codec::{Envelope, HandshakeCodec, MessageCodec};
+use crate::codecs::base::{Envelope, MessageCodec};
 use crate::tpc_pool::TpcPool;
 use compio::buf::IoBuf;
 use std::collections::HashMap;
@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tracing::{error, info};
 use crate::service_handler::ServiceHandler;
 use crate::transport::base::{BufferAllocator, MessageSink, MessageSource, Transport};
-use crate::transport::discovery::Topology;
+use crate::discovery::Topology;
 
 pub trait SessionConfig {
     type Codec: MessageCodec<Dest = Self::Payload>;

@@ -1,5 +1,5 @@
 use crate::align_buffer::AlignedBuffer;
-use crate::message_codec::{Envelope, HandshakeCodec, MessageCodec};
+use crate::codecs::base::{Envelope, MessageCodec};
 use anyhow::Result;
 use rkyv::api::high::{to_bytes_in, HighSerializer, HighValidator};
 use rkyv::bytecheck::CheckBytes;
@@ -7,11 +7,9 @@ use rkyv::rancor::Error;
 use rkyv::ser::allocator::ArenaHandle;
 use rkyv::util::AlignedVec;
 use rkyv::{access, deserialize, Archive, Serialize};
-use crate::codecs::JsonHandshake;
 use crate::server::{DefaultVecAlloc, HasDefaultAllocator};
 use crate::tpc_pool::TpcPool;
 use crate::transport::base::BufferAllocator;
-use crate::transport::discovery::Topology;
 
 #[derive(Archive, Serialize)]
 pub(crate) enum RkyvEnvelope<Req, Res> {
@@ -71,7 +69,6 @@ where
     type ResponseView<'a> = &'a Res::Archived;
 
     type Dest = AlignedBuffer;
-    type Handshake = JsonHandshake;
 
     fn decode(data: &[u8]) -> Result<Envelope<Self::RequestView<'_>, Self::ResponseView<'_>>> {
         let archived = access::<ArchivedRkyvEnvelope<Req, Res>, Error>(data)?;

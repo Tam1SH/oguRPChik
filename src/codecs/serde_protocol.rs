@@ -1,8 +1,7 @@
 use std::marker::PhantomData;
 use serde::{Deserialize, Serialize};
-use crate::message_codec::{Envelope, MessageCodec};
+use crate::codecs::base::{Envelope, MessageCodec};
 use crate::align_buffer::AlignedBuffer;
-use crate::codecs::JsonHandshake;
 use crate::codecs::serde_compatible::serde_format::SerdeFormat;
 
 #[derive(Serialize, Deserialize)]
@@ -29,7 +28,6 @@ where
     type ResponseView<'a> = Res;
 
     type Dest = AlignedBuffer;
-    type Handshake = JsonHandshake;
 
     fn decode(data: &[u8]) -> anyhow::Result<Envelope<Self::RequestView<'_>, Self::ResponseView<'_>>> {
         let wire: WireEnvelope<Req, Res> = F::deserialize(data)?;

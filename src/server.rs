@@ -4,12 +4,11 @@ use std::time::Duration;
 use anyhow::{anyhow, Context};
 use tracing::info;
 
-use crate::message_codec::MessageCodec;
-use crate::worker::ServerWorker;
+use crate::codecs::base::MessageCodec;
+use crate::server_worker::ServerWorker;
 use crate::runtime;
 use crate::service_handler::ServiceHandler;
 use crate::transport::base::{BufferAllocator, MessageSink, MessageSource, TransportBuilder, TopologyRegistry, TransportPerWorkerBuilder, WorkerInitializer};
-use crate::transport::discovery::Topology;
 
 pub struct NoHandler;
 pub struct NoCodec;
@@ -40,8 +39,6 @@ pub struct ServerBuilder<H, C, T, Si, So> {
     handler: H,
     transport: Option<T>,
     registry: Option<Arc<dyn TopologyRegistry>>,
-    topology: Option<Topology>,
-    peer_tx: Option<flume::Sender<Topology>>,
     _phantom: PhantomData<(C, Si, So)>,
 }
 
@@ -51,9 +48,7 @@ pub fn setup() -> ServerBuilder<NoHandler, NoCodec, NoTransport, NoSink, NoSourc
         handler: NoHandler,
         transport: None,
         registry: None,
-        peer_tx: None,
         _phantom: PhantomData,
-        topology: None,
     }
 }
 
@@ -62,9 +57,6 @@ impl<H, C, T, Si, So> ServerBuilder<H, C, T, Si, So> {
     pub fn single_thread(mut self) -> Self {
         self.cores = 1;
         self
-    }
-    pub fn on_peer(self, tx: flume::Sender<Topology>) -> Self {
-        Self { peer_tx: Some(tx), ..self }
     }
     pub fn cores(mut self, cores: usize) -> Self {
         self.cores = cores;
@@ -80,11 +72,9 @@ impl<H, C, T, Si, So> ServerBuilder<H, C, T, Si, So> {
         ServerBuilder {
             cores: self.cores,
             handler,
-            peer_tx: self.peer_tx,
             registry: self.registry,
             transport: self.transport,
             _phantom: PhantomData,
-            topology: self.topology,
         }
     }
 
@@ -94,14 +84,8 @@ impl<H, C, T, Si, So> ServerBuilder<H, C, T, Si, So> {
             handler: self.handler,
             registry: Some(registry),
             transport: self.transport,
-            peer_tx: self.peer_tx,
             _phantom: PhantomData,
-            topology: self.topology,
         }
-    }
-
-    pub fn announce(self, topology: Topology) -> Self {
-        Self { topology: Some(topology), ..self }
     }
 
     pub fn with_transport<NewT, NewSi, NewSo, P>(
@@ -118,10 +102,8 @@ impl<H, C, T, Si, So> ServerBuilder<H, C, T, Si, So> {
             cores: self.cores,
             handler: self.handler,
             registry: self.registry,
-            peer_tx: self.peer_tx,
             transport: Some(transport),
             _phantom: PhantomData,
-            topology: self.topology,
         }
     }
 }
@@ -174,8 +156,6 @@ where
                 builder,
                 h,
                 Some(registry.clone()),
-                self.peer_tx.clone(),
-                self.topology.clone()
             )
                 .with_context(|| format!("Failed to spawn worker on core {}", core_id))?;
         }

@@ -1,6 +1,6 @@
 use std::marker::PhantomData;
 use crate::client_per_core::{ClientPerCore, ResponseGuard};
-use crate::message_codec::MessageCodec;
+use crate::codecs::base::MessageCodec;
 use crate::runtime;
 use crate::transport::stream::Connector;
 use anyhow::{anyhow, Result};
@@ -8,9 +8,9 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tracing::{debug, error, info, instrument, warn};
+use crate::discovery::Topology;
 use crate::server::HasDefaultAllocator;
 use crate::transport::base::{MessageSink, MessageSource, TransportBuilder, TransportConnector};
-use crate::transport::discovery::Topology;
 
 #[derive(Clone, Copy, Debug)]
 pub enum Priority {
@@ -53,7 +53,7 @@ where
             expected_codec = %C::kind()
         )
     )]
-    pub async fn connect<T>(transport: T, topology: Topology) -> Result<(Self, Option<Topology>)>
+    pub async fn connect<T>(transport: T, topology: Topology) -> Result<Self>
     where
         T: TransportBuilder<P>,
     {
@@ -104,7 +104,7 @@ where
 
         info!("All connectors prepared, initiating connect_internal");
 
-        match Self::connect_internal(connectors, num_cores, topology).await {
+        match Self::connect_internal(connectors, num_cores).await {
             Ok(client) => {
                 info!("Client successfully connected to all cores");
                 Ok(client)
@@ -115,67 +115,84 @@ where
             }
         }
     }
-
+    #[instrument(skip(connectors))]
     async fn connect_internal<Conn, Si, So>(
         connectors: Vec<Conn>,
-        num_cores: usize,
-        topology: Topology,
-    ) -> Result<(Self, Option<Topology>)>
+        num_cores: usize
+    ) -> Result<Self>
     where
         Si: MessageSink<Payload = C::Dest> + Clone + 'static,
         So: MessageSource<Payload = C::Dest> + 'static,
         Conn: TransportConnector<Si, So>,
     {
+
         runtime::init(num_cores);
 
         let mut workers = Vec::with_capacity(num_cores);
-        let (init_tx, init_rx) = flume::bounded::<Result<(usize, Topology)>>(num_cores);
+        let (init_tx, init_rx) = flume::bounded::<Result<usize>>(num_cores);
 
         for (core_id, connector) in connectors.into_iter().enumerate() {
             let (worker_tx, worker_rx) = flume::unbounded::<CallRequest<C, P>>();
             workers.push(worker_tx);
 
             let sync_tx = init_tx.clone();
-            let topology = topology.clone();
 
             runtime::spawn_on(core_id, move || async move {
+
                 let connect_res = async {
                     let transport = connector.connect().await?;
                     ClientPerCore::<C, Si, So, <C::Dest as HasDefaultAllocator>::Alloc>::connect(
-                        transport,
-                        topology,
+                        transport
                     ).await
                 }.await;
 
                 match connect_res {
-                    Ok((mut client, peer_topology)) => {
-                        let _ = sync_tx.send_async(Ok((core_id, peer_topology))).await;
+                    Ok(mut client) => {
+                        debug!(core_id, "Worker connected successfully");
+                        let _ = sync_tx.send_async(Ok(core_id)).await;
+
+
                         while let Ok(msg) = worker_rx.recv_async().await {
+
                             let res = client.call(msg.req).await;
-                            let _ = msg.resp_tx.send(res);
+                            if msg.resp_tx.send(res).is_err() {
+                                warn!(
+                                    core_id,
+                                    "Caller dropped response channel before receiving result"
+                                );
+                            }
                         }
+                        info!(core_id, "Worker shutting down (channel closed)");
                     }
                     Err(e) => {
+                        error!(core_id, error = %e, "Worker failed to connect");
                         let _ = sync_tx.send_async(Err(e)).await;
                     }
                 }
             });
         }
 
-        let mut peer_topologies = Vec::with_capacity(num_cores);
         for _ in 0..num_cores {
-            let (_, topology) = init_rx.recv_async().await??;
-            peer_topologies.push(topology);
+            match init_rx.recv_async().await {
+                Ok(Ok(core_id)) => {
+                    debug!(core_id, "Worker sync successfully");
+                }
+                Ok(Err(e)) => {
+                    error!(error = %e, "Failed to initialize one or more core workers");
+                    return Err(e);
+                }
+                Err(_) => {
+                    return Err(anyhow!("Init channel closed prematurely"));
+                }
+            }
         }
-
-        let peer_topology = peer_topologies.into_iter().next();
 
         info!(num_workers = workers.len(), "Client pool initialized");
 
-        Ok((Self {
+        Ok(Self {
             workers: Rc::new(workers),
             rr_idx: Rc::new(AtomicUsize::new(0)),
-        }, peer_topology))
+        })
     }
 
     pub async fn call(&self, req: C::Request) -> Result<ResponseGuard<C::Dest, C>> {
