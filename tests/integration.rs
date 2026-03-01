@@ -13,7 +13,7 @@ mod tests {
     use ogurpchik::transport::base::TransportBuilder;
     use ogurpchik::transport::impls::peer::config::PeerConfig;
     use ogurpchik::transport::stream::adapters::shm::ShmTransport;
-    use ogurpchik::transport::stream::adapters::vsock::VsockTransport;
+    use ogurpchik::transport::stream::adapters::vsock::{VsockAddr, VsockTransport};
     use ogurpchik::node::Node;
 
     #[derive(Archive, Deserialize, Serialize, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -79,7 +79,7 @@ mod tests {
 
     #[compio::test]
     async fn test_rpc_vsock() -> anyhow::Result<()> {
-        let transport = VsockTransport::server(0, 5000);
+        let transport = VsockTransport::server(VsockAddr::Cid(0), 5000);
 
         let res = rpc_call!(transport, RkyvCodec<Request, Response>, EchoHandler, Request::Ping);
 

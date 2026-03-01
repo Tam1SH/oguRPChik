@@ -88,9 +88,9 @@ impl KvStore for RegistryKv {
                 match hkcu.open_subkey(&path_owned) {
                     Ok(k) => {
                         tracing::debug!(key = %path_owned, "registry watch key found");
+                        let _ = tx.send(());
                         break k;
                     }
-                    // key may not exist yet, retry
                     Err(e) if e.raw_os_error() == Some(2) => {
                         tracing::trace!(key = %path_owned, "registry watch key not yet, retrying");
                         std::thread::sleep(std::time::Duration::from_millis(200));

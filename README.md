@@ -1,5 +1,5 @@
 # oguRPChik 🥒
-<div>
+<div align="center">
   <img src="/Unusual-Bananas-0.png" width="350" alt="Ogurpchik Logo">
   <br>
 
@@ -16,7 +16,7 @@ This crate is actively used in my main project for duplex communication (Host <-
 
 However, let's be honest: I didn't extract it into a separate library for "better modularity" or "architectural purity". I did it because the pun **Ogurpchik** (*Ogurets* + *RPC*) popped into my head, and I simply needed a public repository to make the joke official.
 
-## 🚀 Features
+## 🚀 WHAT THIS PICKLE CAN DO (for very smol ones)
 
 - **Transport Agnostic**: Works over TCP, VSOCK, SHM, or any other communication backend you choose to implement.
 - **Message Flexible**: Supports both data-owning (Serde) and zero-copy view formats (rkyv).
@@ -74,8 +74,8 @@ use ogurpchik::transport::stream::adapters::tcp::TcpTransport;
 #[compio::main]
 async fn main() -> anyhow::Result<()> {
     let (client, _guard) = Node::new()
-        .serve::<MyCodec, _, _>(TcpTransport::new("127.0.0.1"), MyHandler)
-        .connect::<MyCodec, _>(TcpTransport::new("127.0.0.1"))
+        .serve::<MyCodec, _, _>(TcpTransport::new("127.0.0.1:1337"), MyHandler)
+        .connect::<MyCodec, _>(TcpTransport::new("127.0.0.1:1337"))
         .start()
         .await?;
 
@@ -94,7 +94,7 @@ Both sides discover each other without any prior coordination.
 ```rust
 use ogurpchik::discovery::{register_vm_default, services};
 use ogurpchik::node::Node;
-use ogurpchik::transport::stream::adapters::vsock::VsockTransport;
+use ogurpchik::transport::stream::adapters::vsock::{VsockTransport, VsockAddr};
 
 #[compio::main]
 async fn main() -> anyhow::Result<()> {
@@ -102,10 +102,10 @@ async fn main() -> anyhow::Result<()> {
     register_vm_default("WSL")?;
 
     let (guest_client, _guard) = Node::new()
-        .serve::<AgentCodec, _, _>(VsockTransport::server(u32::MAX, 5000), HostHandler {})
-        .publish(services::HOST)
-        .connect::<HostCodec, _>(VsockTransport::client(u32::MAX))
-        .wait_for(services::GUEST)
+        .serve::<AgentCodec, _, _>(VsockTransport::server(VsockAddr::SelfManaged, 5000), HostHandler {})
+        .publish("HOST")
+        .connect::<HostCodec, _>(VsockTransport::client(VsockAddr::SelfManaged))
+        .wait_for("GUEST")
         .start()
         .await?;
 
@@ -119,10 +119,10 @@ async fn main() -> anyhow::Result<()> {
 #[compio::main]
 async fn main() -> anyhow::Result<()> {
     let (host_client, _guard) = Node::new()
-        .serve::<HostCodec, _, _>(VsockTransport::server(u32::MAX, 5001), GuestHandler)
-        .publish(services::GUEST)
+        .serve::<HostCodec, _, _>(VsockTransport::server(VsockAddr::SelfManaged, 5001), GuestHandler)
+        .publish("GUEST")
         .connect::<AgentCodec, _>(VsockTransport::client(2))
-        .wait_for(services::HOST)
+        .wait_for("HOST")
         .start()
         .await?;
 
@@ -139,8 +139,8 @@ Each side publishes itself to the Windows registry and waits for the other to ap
 #[compio::main]
 async fn main() -> anyhow::Result<()> {
     let _guard = Node::new()
-        .serve::<MyCodec, _, _>(VsockTransport::server(u32::MAX, 5000), MyHandler)
-        .publish(services::MY_SERVICE)
+        .serve::<MyCodec, _, _>(VsockTransport::server(VsockAddr::SelfManaged, 5000), MyHandler)
+        .publish("MY_SERVICE")
         .start()
         .await?;
 
@@ -154,8 +154,8 @@ async fn main() -> anyhow::Result<()> {
 #[compio::main]
 async fn main() -> anyhow::Result<()> {
     let client = Node::new()
-        .connect::<MyCodec, _>(VsockTransport::client(2))
-        .wait_for(services::MY_SERVICE)
+        .connect::<MyCodec, _>(VsockTransport::client(VsockAddr::Cid(2)))
+        .wait_for("MY_SERVICE")
         .start()
         .await?;
 
@@ -176,11 +176,13 @@ Discovery is backed by the Windows registry (`HKCU\Software\Ogurpchik\Services`)
 HKCU\Software\Ogurpchik\
   Services\
     host    →  {"transport_kind":"vsock","codec_kind":"rkyv","map":{"0":"2:5000"}}
-    guest   →  {"transport_kind":"vsock","codec_kind":"rkyv","map":{"0":"3:5001"}}
+    guest   →  {"transport_kind":"vsock","codec_kind":"rkyv","map":{"0":"550e8400-e29b-41d4-a716-446655440000:5001"}}
   Hosts\
     WSL     →  "550e8400-e29b-41d4-a716-446655440000"
 ```
 
 ## License
 
+
 MIT
+

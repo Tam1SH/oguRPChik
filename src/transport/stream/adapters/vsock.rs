@@ -44,31 +44,33 @@ pub struct VsockTransport {
 }
 
 impl VsockTransport {
-    pub fn server(cid: u32, base_port: u32) -> Self {
-        Self::new(cid, Some(base_port))
+    pub fn server(addr: VsockAddr,  base_port: u32) -> Self {
+        Self::new(addr, Some(base_port))
     }
 
-    pub fn client(cid: u32) -> Self {
-        Self::new(cid, None)
+    pub fn client(addr: VsockAddr) -> Self {
+        Self::new(addr, None)
     }
 
-    fn new(cid: u32, base_port: Option<u32>) -> Self {
+    fn new(addr: VsockAddr, base_port: Option<u32>) -> Self {
 
         let base_port = base_port.unwrap_or(0);
 
-        let resolved_id = if cid == u32::MAX {
-            #[cfg(windows)]
-            {
-                use crate::transport::stream::vsock::utils::*;
-                match get_best_vmid() {
-                    Ok(u) => VsockTarget::Guid(guid_to_uuid(u)),
-                    _ => VsockTarget::Cid(u32::MAX),
+        let resolved_id = match addr {
+            VsockAddr::Cid(c) => VsockTarget::Cid(c),
+            VsockAddr::Id(uuid) => VsockTarget::Guid(uuid),
+            VsockAddr::SelfManaged => {
+                #[cfg(windows)]
+                {
+                    use crate::transport::stream::vsock::utils::*;
+                    match get_best_vmid() {
+                        Ok(u) => VsockTarget::Guid(guid_to_uuid(u)),
+                        _ => VsockTarget::Cid(u32::MAX),
+                    }
                 }
+                #[cfg(unix)]
+                { VsockTarget::Cid(u32::MAX) }
             }
-            #[cfg(unix)]
-            { VsockTarget::Cid(u32::MAX) }
-        } else {
-            VsockTarget::Cid(cid)
         };
 
         info!(
