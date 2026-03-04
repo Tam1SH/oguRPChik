@@ -7,7 +7,7 @@ pub mod utils;
 pub mod server_worker;
 pub mod tpc_pool;
 pub mod transport;
-mod align_buffer;
+pub mod align_buffer;
 pub mod codecs;
 pub mod discovery;
 pub mod service_handler;
