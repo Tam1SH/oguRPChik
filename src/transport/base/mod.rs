@@ -16,7 +16,7 @@ pub trait RawMessageSink: 'static {
     fn poll_send(
         &self,
         cx: &mut Context<'_>,
-        data: &mut Option<Self::Message>
+        data: &mut Option<Self::Message>,
     ) -> Poll<anyhow::Result<()>>;
 }
 
@@ -27,7 +27,6 @@ pub trait RawMessageSource: 'static {
 }
 
 pub trait MessageSink: Clone + 'static {
-
     type Payload: 'static;
 
     async fn send(&self, data: Self::Payload) -> anyhow::Result<()>;
@@ -42,8 +41,6 @@ pub trait Transport<Sink: MessageSink, Source: MessageSource>: 'static {
     fn decompose(self) -> anyhow::Result<(Sink, Source)>;
 }
 
-
-
 pub trait TransportConnector<Sink: MessageSink, Source: MessageSource>: Send + 'static {
     type Transport: Transport<Sink, Source>;
 
@@ -54,9 +51,7 @@ pub trait TransportAcceptor<Sink: MessageSink, Source: MessageSource>: 'static {
     type Transport: Transport<Sink, Source>;
 
     async fn accept(&self) -> anyhow::Result<Self::Transport>;
-
 }
-
 
 #[derive(Clone)]
 pub struct Endpoint {
@@ -84,8 +79,9 @@ pub trait TransportBuilder<P: AsRef<[u8]>> {
     fn client_connector(&self, endpoint: String) -> anyhow::Result<Self::Connector>;
 }
 
-
-pub trait TransportPerWorkerBuilder<Sink: MessageSink, Source: MessageSource>: Send + Sync + 'static {
+pub trait TransportPerWorkerBuilder<Sink: MessageSink, Source: MessageSource>:
+    Send + Sync + 'static
+{
     type Transport: Transport<Sink, Source>;
     type Acceptor: TransportAcceptor<Sink, Source, Transport = Self::Transport>;
     type Initializer: WorkerInitializer;
@@ -93,7 +89,7 @@ pub trait TransportPerWorkerBuilder<Sink: MessageSink, Source: MessageSource>: S
     async fn bind(
         self,
         core_id: usize,
-        registry: Option<&Arc<dyn TopologyRegistry>>
+        registry: Option<&Arc<dyn TopologyRegistry>>,
     ) -> io::Result<Self::Acceptor>;
 }
 

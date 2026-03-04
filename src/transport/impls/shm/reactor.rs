@@ -1,13 +1,16 @@
-use std::sync::Arc;
-use std::task::Waker;
 use dashmap::DashMap;
 use iceoryx2::port::listener::Listener;
 use iceoryx2::prelude::*;
 use iceoryx2::waitset::{WaitSet, WaitSetAttachmentId, WaitSetGuard};
-use tracing::{error, trace, debug};
+use std::sync::Arc;
+use std::task::Waker;
+use tracing::{debug, error, trace};
 
 pub enum ReactorCmd {
-    Attach(Listener<ipc::Service>, flume::Sender<WaitSetAttachmentId<ipc::Service>>),
+    Attach(
+        Listener<ipc::Service>,
+        flume::Sender<WaitSetAttachmentId<ipc::Service>>,
+    ),
 }
 
 unsafe impl Send for ReactorCmd {}
@@ -32,7 +35,6 @@ impl GlobalReactor {
         let wakers_inner = wakers.clone();
 
         std::thread::spawn(move || {
-
             let waitset = WaitSetBuilder::new()
                 .create::<ipc::Service>()
                 .expect("Failed to create Global WaitSet");
@@ -40,7 +42,6 @@ impl GlobalReactor {
             let mut attachments = Vec::new();
 
             loop {
-
                 while let Ok(cmd) = cmd_rx.try_recv() {
                     match cmd {
                         ReactorCmd::Attach(listener, reply_tx) => {
@@ -51,7 +52,8 @@ impl GlobalReactor {
                             match waitset.attach_notification(listener_ref) {
                                 Ok(guard) => {
                                     let id = WaitSetAttachmentId::from_guard(&guard);
-                                    let guard_static: WaitSetGuard<'static, 'static, ipc::Service> = unsafe { std::mem::transmute(guard) };
+                                    let guard_static: WaitSetGuard<'static, 'static, ipc::Service> =
+                                        unsafe { std::mem::transmute(guard) };
                                     attachments.push((boxed, guard_static));
                                     let _ = reply_tx.send(id);
                                 }
@@ -63,15 +65,13 @@ impl GlobalReactor {
 
                 let _ = waitset.wait_and_process_once_with_timeout(
                     |id| {
-
                         if let Some((_, waker)) = wakers_inner.remove(&id) {
                             waker.wake();
                         }
                         CallbackProgression::Continue
                     },
-                    std::time::Duration::from_micros(50)
+                    std::time::Duration::from_micros(50),
                 );
-
             }
         });
 

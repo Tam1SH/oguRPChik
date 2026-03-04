@@ -1,13 +1,13 @@
+use compio::BufResult;
 use compio::buf::{IntoInner, IoBuf, IoBufMut};
+use compio::driver::SharedFd;
 use compio::driver::op::{Accept, Connect, Recv, Send};
 use compio::io::{AsyncRead, AsyncWrite};
-use compio::runtime::{submit, Attacher};
-use compio::BufResult;
+use compio::runtime::{Attacher, submit};
 use socket2::{Domain, SockAddr, Socket, Type};
 use std::io;
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
-use compio::driver::SharedFd;
 use tracing::{debug, error, instrument, trace};
 
 #[derive(Clone)]
@@ -34,7 +34,6 @@ impl VsockStream {
         let BufResult(res, _) = submit(op).await;
 
         if let Err(ref e) = res {
-
             error!(error = %e, cid, port, "VsockStream: proactor submit returned error");
         } else {
             debug!(cid, port, "VsockStream: proactor connect successful");
@@ -55,7 +54,6 @@ impl VsockStream {
         })
     }
 }
-
 
 struct VsockHandle(Attacher<OwnedFd>);
 
@@ -113,7 +111,6 @@ impl VsockListener {
 
     pub async fn accept(&self) -> io::Result<(VsockStream, SockAddr)> {
         loop {
-
             let op = Accept::new(VsockHandle(self.inner.clone()));
 
             let BufResult(res, op) = submit(op).await;
@@ -129,7 +126,7 @@ impl VsockListener {
                         VsockStream {
                             inner: Attacher::new(owned_fd)?,
                         },
-                        addr
+                        addr,
                     ));
                 }
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {
@@ -141,5 +138,4 @@ impl VsockListener {
             }
         }
     }
-
 }

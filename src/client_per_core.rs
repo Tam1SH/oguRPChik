@@ -1,15 +1,26 @@
+use crate::codecs::base::{Envelope, MessageCodec};
 use crate::main_loop::run_session;
-use crate::codecs::base::{MessageCodec, Envelope};
+use crate::service_handler::ServiceHandler;
+use crate::transport::base::{BufferAllocator, MessageSink, MessageSource, Transport};
 use anyhow::anyhow;
 use dashmap::DashMap;
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
-use tracing::{error, info};
-use crate::discovery::Topology;
-use crate::service_handler::ServiceHandler;
-use crate::transport::base::{BufferAllocator, MessageSink, MessageSource, Transport};
+
+#[derive(Clone, Debug)]
+pub struct ClientConfig {
+    pub timeout_seconds: u64,
+}
+
+impl Default for ClientConfig {
+    fn default() -> Self {
+        Self {
+            timeout_seconds: 10,
+        }
+    }
+}
 
 pub struct ClientPerCore<C, Si, So, A>
 where
@@ -19,6 +30,7 @@ where
     sink: Si,
     pending: Rc<DashMap<u64, oneshot::Sender<C::Dest>>>,
     next_id: Rc<AtomicU64>,
+    config: ClientConfig,
     _phantom: PhantomData<(C, So, A)>,
 }
 
@@ -33,10 +45,10 @@ where
             sink: self.sink.clone(),
             pending: self.pending.clone(),
             _phantom: PhantomData,
+            config: self.config.clone(),
         }
     }
 }
-
 
 impl<C, Si, So, A> ClientPerCore<C, Si, So, A>
 where
@@ -45,23 +57,10 @@ where
     So: MessageSource<Payload = C::Dest> + 'static,
     A: BufferAllocator<Payload = C::Dest> + 'static,
 {
-    pub fn new(
-        sink: Si,
-        pending: Rc<DashMap<u64, oneshot::Sender<C::Dest>>>,
-    ) -> Self {
-        Self {
-            sink,
-            pending,
-            next_id: Rc::new(AtomicU64::new(0)),
-            _phantom: PhantomData,
-        }
-    }
-
-
     pub async fn connect<T: Transport<Si, So>>(
         transport: T,
+        config: ClientConfig,
     ) -> anyhow::Result<Self> {
-
         let (sink, source) = transport.decompose()?;
 
         let pending = Rc::new(DashMap::new());
@@ -69,17 +68,18 @@ where
         let sink_clone = sink.clone();
 
         compio::runtime::spawn(async move {
-            run_session::<(C, A), _, _, _>(
-                NoOpHandler,
-                sink_clone,
-                source,
-                p_clone
-            ).await;
-        }).detach();
+            run_session::<(C, A), _, _, _>(NoOpHandler, sink_clone, source, p_clone).await;
+        })
+        .detach();
 
-        Ok(Self { sink, pending, next_id: Rc::new(AtomicU64::new(0)), _phantom: PhantomData })
+        Ok(Self {
+            sink,
+            pending,
+            next_id: Rc::new(AtomicU64::new(0)),
+            _phantom: PhantomData,
+            config,
+        })
     }
-
 
     pub async fn call(&mut self, req: C::Request) -> anyhow::Result<ResponseGuard<C::Dest, C>> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
@@ -87,24 +87,30 @@ where
 
         self.pending.insert(id, tx);
 
-        type CurrentProtocolMessageType<C> = Envelope<<C as MessageCodec>::Request, <C as MessageCodec>::Response>;
-        let mut buf = A::allocate(size_of::<CurrentProtocolMessageType<C>>());
+        type CurrentProtocolMessageType<C> =
+            Envelope<<C as MessageCodec>::Request, <C as MessageCodec>::Response>;
+        let mut buf = A::allocate(size_of::<CurrentProtocolMessageType<C>>() * 2);
 
         C::encode(Envelope::Request { id, payload: req }, &mut buf)?;
 
         self.sink.send(buf).await?;
 
-        let response_buf = match compio::time::timeout(Duration::from_secs(5), rx).await {
-            Ok(Ok(b)) => b,
-            Ok(Err(_)) => {
-                self.pending.remove(&id);
-                return Err(anyhow!("Channel closed"));
-            }
-            Err(_) => {
-                self.pending.remove(&id);
-                return Err(anyhow!("Request timeout"));
-            }
-        };
+        let response_buf =
+            match compio::time::timeout(Duration::from_secs(self.config.timeout_seconds), rx).await
+            {
+                Ok(Ok(b)) => b,
+                Ok(Err(e)) => {
+                    self.pending.remove(&id);
+                    return Err(anyhow!("Channel closed").context(e));
+                }
+                Err(_) => {
+                    self.pending.remove(&id);
+                    return Err(anyhow!(
+                        "Request timeout ({}s)",
+                        self.config.timeout_seconds
+                    ));
+                }
+            };
 
         C::decode(response_buf.as_ref()).map_err(|e| anyhow!("Invalid response data: {e}"))?;
 
@@ -113,7 +119,6 @@ where
 }
 
 pub struct ResponseGuard<Payload: AsRef<[u8]> + Send + 'static, Codec: MessageCodec> {
-
     #[allow(unused)]
     payload_guard: Payload,
 
@@ -125,12 +130,11 @@ where
     Payload: AsRef<[u8]> + Send + 'static,
     for<'b> Codec::ResponseView<'b>: Send,
     Codec: MessageCodec,
-{}
-
+{
+}
 
 impl<'a, Payload: AsRef<[u8]> + Send + 'static, Codec: MessageCodec> ResponseGuard<Payload, Codec> {
     pub fn try_new(payload: Payload) -> anyhow::Result<Self> {
-
         let (ptr, len) = {
             let slice = payload.as_ref();
             (slice.as_ptr(), slice.len())
@@ -154,11 +158,11 @@ impl<'a, Payload: AsRef<[u8]> + Send + 'static, Codec: MessageCodec> ResponseGua
             view: view_static,
         })
     }
-
 }
 
-impl<Payload: AsRef<[u8]> + Send + 'static, Codec: MessageCodec> std::ops::Deref for ResponseGuard<Payload, Codec> {
-
+impl<Payload: AsRef<[u8]> + Send + 'static, Codec: MessageCodec> std::ops::Deref
+    for ResponseGuard<Payload, Codec>
+{
     type Target = Codec::ResponseView<'static>;
 
     fn deref(&self) -> &Self::Target {

@@ -1,14 +1,17 @@
+use anyhow::{Context, anyhow};
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
-use anyhow::{anyhow, Context};
 use tracing::info;
 
 use crate::codecs::base::MessageCodec;
-use crate::server_worker::ServerWorker;
 use crate::runtime;
+use crate::server_worker::ServerWorker;
 use crate::service_handler::ServiceHandler;
-use crate::transport::base::{BufferAllocator, MessageSink, MessageSource, TransportBuilder, TopologyRegistry, TransportPerWorkerBuilder, WorkerInitializer};
+use crate::transport::base::{
+    BufferAllocator, MessageSink, MessageSource, TopologyRegistry, TransportBuilder,
+    TransportPerWorkerBuilder, WorkerInitializer,
+};
 
 pub struct NoHandler;
 pub struct NoCodec;
@@ -24,15 +27,14 @@ impl HasDefaultAllocator for Vec<u8> {
     type Alloc = DefaultVecAlloc;
 }
 
-
 #[derive(Clone)]
 pub struct DefaultVecAlloc;
 impl BufferAllocator for DefaultVecAlloc {
     type Payload = Vec<u8>;
-    fn allocate(size: usize) -> Vec<u8> { Vec::with_capacity(size) }
+    fn allocate(size: usize) -> Vec<u8> {
+        Vec::with_capacity(size)
+    }
 }
-
-
 
 pub struct ServerBuilder<H, C, T, Si, So> {
     cores: usize,
@@ -53,7 +55,6 @@ pub fn setup() -> ServerBuilder<NoHandler, NoCodec, NoTransport, NoSink, NoSourc
 }
 
 impl<H, C, T, Si, So> ServerBuilder<H, C, T, Si, So> {
-
     pub fn single_thread(mut self) -> Self {
         self.cores = 1;
         self
@@ -96,7 +97,7 @@ impl<H, C, T, Si, So> ServerBuilder<H, C, T, Si, So> {
         NewSi: MessageSink,
         NewSo: MessageSource,
         NewT: TransportBuilder<P>,
-        P: AsRef<[u8]>
+        P: AsRef<[u8]>,
     {
         ServerBuilder {
             cores: self.cores,
@@ -108,7 +109,6 @@ impl<H, C, T, Si, So> ServerBuilder<H, C, T, Si, So> {
     }
 }
 
-
 impl<H, C, T, Si, So> ServerBuilder<H, C, T, Si, So>
 where
     C: MessageCodec + 'static,
@@ -117,10 +117,9 @@ where
     Si: MessageSink<Payload = C::Dest>,
     So: MessageSource<Payload = C::Dest>,
     T: TransportBuilder<C::Dest> + Send + Sync + 'static,
-    <T as TransportBuilder<C::Dest>>::Builder: TransportPerWorkerBuilder<Si, So>
+    <T as TransportBuilder<C::Dest>>::Builder: TransportPerWorkerBuilder<Si, So>,
 {
-    pub async fn run(self) -> anyhow::Result<std::convert::Infallible>
-    {
+    pub async fn run(self) -> anyhow::Result<std::convert::Infallible> {
         let transport = self.transport.ok_or_else(|| anyhow!("Transport not set"))?;
         let registry = self.registry.ok_or_else(|| anyhow!("Registry not set"))?;
 
@@ -157,7 +156,7 @@ where
                 h,
                 Some(registry.clone()),
             )
-                .with_context(|| format!("Failed to spawn worker on core {}", core_id))?;
+            .with_context(|| format!("Failed to spawn worker on core {}", core_id))?;
         }
 
         loop {

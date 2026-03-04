@@ -1,14 +1,14 @@
+use crate::align_buffer::AlignedBuffer;
+use crate::transport::base::TransportBuilder;
+use crate::transport::impls::peer::adapter::{GenericStreamBuilder, GenericStreamConnector};
+use crate::transport::impls::peer::config::PeerConfig;
+use crate::transport::impls::peer::handle::{PeerSink, PeerSource};
+use crate::transport::stream::vsock::{VsockAcceptorBuilder, VsockConnector, VsockTarget};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use tracing::{debug, error, info, instrument, trace};
 use uuid::Uuid;
-use crate::align_buffer::AlignedBuffer;
-use crate::transport::impls::peer::handle::{PeerSink, PeerSource};
-use crate::transport::impls::peer::adapter::{GenericStreamBuilder, GenericStreamConnector};
-use crate::transport::base::TransportBuilder;
-use crate::transport::impls::peer::config::PeerConfig;
-use crate::transport::stream::vsock::{VsockAcceptorBuilder, VsockConnector, VsockTarget};
 
 #[derive(Debug, Clone, Copy)]
 pub enum VsockAddr {
@@ -34,7 +34,6 @@ impl FromStr for VsockAddr {
     }
 }
 
-
 #[derive(Clone)]
 pub struct VsockTransport {
     resolved_id: VsockTarget,
@@ -44,7 +43,7 @@ pub struct VsockTransport {
 }
 
 impl VsockTransport {
-    pub fn server(addr: VsockAddr,  base_port: u32) -> Self {
+    pub fn server(addr: VsockAddr, base_port: u32) -> Self {
         Self::new(addr, Some(base_port))
     }
 
@@ -53,7 +52,6 @@ impl VsockTransport {
     }
 
     fn new(addr: VsockAddr, base_port: Option<u32>) -> Self {
-
         let base_port = base_port.unwrap_or(0);
 
         let resolved_id = match addr {
@@ -69,7 +67,9 @@ impl VsockTransport {
                     }
                 }
                 #[cfg(unix)]
-                { VsockTarget::Cid(u32::MAX) }
+                {
+                    VsockTarget::Cid(u32::MAX)
+                }
             }
         };
 
@@ -94,7 +94,6 @@ impl VsockTransport {
             VsockAddr::Cid(c) => VsockTarget::Cid(c),
         }
     }
-
 }
 
 impl TransportBuilder<AlignedBuffer> for VsockTransport {
@@ -109,7 +108,10 @@ impl TransportBuilder<AlignedBuffer> for VsockTransport {
 
     #[instrument(skip(self), fields(cid = ?self.resolved_id, base_port = self.base_port))]
     fn server_builder(&self) -> Self::Builder {
-        assert!(self.base_port > 0, "server_builder() called on client-side VsockTransport");
+        assert!(
+            self.base_port > 0,
+            "server_builder() called on client-side VsockTransport"
+        );
         let offset = self.port_offset.fetch_add(1, Ordering::SeqCst);
         let port = self.base_port + offset;
 
@@ -123,19 +125,16 @@ impl TransportBuilder<AlignedBuffer> for VsockTransport {
     fn client_connector(&self, endpoint: String) -> anyhow::Result<Self::Connector> {
         trace!("Starting client connector resolution");
 
-        let (addr_str, port_str) = endpoint.rsplit_once(':')
-            .ok_or_else(|| {
-                let err = anyhow::anyhow!("Invalid format: expected ID:PORT, got '{}'", endpoint);
-                error!(error = %err);
-                err
-            })?;
-
+        let (addr_str, port_str) = endpoint.rsplit_once(':').ok_or_else(|| {
+            let err = anyhow::anyhow!("Invalid format: expected ID:PORT, got '{}'", endpoint);
+            error!(error = %err);
+            err
+        })?;
 
         let logical_addr: VsockAddr = addr_str.parse().map_err(|e| {
             error!(addr = %addr_str, "Failed to parse VSOCK address: {}", e);
             anyhow::anyhow!("Address parse error: {}", e)
         })?;
-
 
         let port: u32 = port_str.parse().map_err(|e| {
             error!(port = %port_str, "Failed to parse port: {}", e);

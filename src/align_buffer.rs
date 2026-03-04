@@ -1,8 +1,8 @@
-use std::mem;
+use crate::tpc_pool::TpcPool;
 use compio::buf::{IoBuf, IoBufMut, SetLen};
 use rkyv::util::AlignedVec;
+use std::mem;
 use std::mem::MaybeUninit;
-use crate::tpc_pool::TpcPool;
 
 #[derive(Default)]
 pub struct AlignedBuffer(pub AlignedVec);

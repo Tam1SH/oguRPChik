@@ -1,23 +1,25 @@
-use crate::main_loop::{run_session, SessionConfig};
+use crate::main_loop::{SessionConfig, run_session};
 use crate::runtime;
-use crate::transport::stream::AcceptorBuilder;
-use anyhow::{Context, Result};
+use crate::service_handler::ServiceHandler;
+use crate::transport::base::{
+    MessageSink, MessageSource, TopologyRegistry, Transport, TransportAcceptor,
+    TransportPerWorkerBuilder, WorkerInitializer,
+};
+use anyhow::Result;
+use dashmap::DashMap;
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
-use dashmap::DashMap;
 use tracing::{error, info};
-use crate::service_handler::ServiceHandler;
-use crate::transport::base::{BufferAllocator, MessageSink, MessageSource, TopologyRegistry, Transport, TransportAcceptor, TransportPerWorkerBuilder, WorkerInitializer};
-
 
 pub struct ServerWorker<C: SessionConfig, H: ServiceHandler<C::Codec>> {
     phantom: PhantomData<(C, H)>,
 }
 
-
-impl<C: SessionConfig + 'static, H: ServiceHandler<C::Codec> + Clone + Send + 'static> ServerWorker<C, H> {
+impl<C: SessionConfig + 'static, H: ServiceHandler<C::Codec> + Clone + Send + 'static>
+    ServerWorker<C, H>
+{
     pub fn spawn<B, Sink, Source>(
         core_id: usize,
         builder: B,
@@ -37,9 +39,9 @@ impl<C: SessionConfig + 'static, H: ServiceHandler<C::Codec> + Clone + Send + 's
                     return;
                 }
             };
-            
+
             B::Initializer::init(core_id);
-            
+
             info!(core_id, "Server worker listening");
 
             loop {
@@ -53,7 +55,7 @@ impl<C: SessionConfig + 'static, H: ServiceHandler<C::Codec> + Clone + Send + 's
                             Err(e) => {
                                 error!(core_id, error = %e, "Transport error");
                                 compio::time::sleep(Duration::from_millis(1000)).await;
-                                continue
+                                continue;
                             }
                         };
 
@@ -64,7 +66,7 @@ impl<C: SessionConfig + 'static, H: ServiceHandler<C::Codec> + Clone + Send + 's
 
                             run_session::<C, _, _, _>(h, sink, source, pending).await;
                         })
-                            .detach();
+                        .detach();
                     }
                     Err(e) => {
                         error!(core_id, error = %e, "Accept error");

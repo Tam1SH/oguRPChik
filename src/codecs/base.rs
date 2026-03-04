@@ -16,12 +16,7 @@ pub trait MessageCodec: Send + Sync + 'static {
 
     fn decode(data: &[u8]) -> Result<Envelope<Self::RequestView<'_>, Self::ResponseView<'_>>>;
 
-    fn encode(
-        msg: Envelope<Self::Request, Self::Response>,
-        dest: &mut Self::Dest,
-    ) -> Result<()>;
+    fn encode(msg: Envelope<Self::Request, Self::Response>, dest: &mut Self::Dest) -> Result<()>;
 
     fn kind() -> &'static str;
 }
-
-

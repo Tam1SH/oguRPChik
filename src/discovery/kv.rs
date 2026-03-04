@@ -1,4 +1,4 @@
-use anyhow::{Result, bail, anyhow};
+use anyhow::{Result, bail};
 
 pub trait KvStore: Send + Sync + 'static {
     fn write(&self, key: &str, value: &str) -> Result<()>;
@@ -46,8 +46,8 @@ impl RegistryKv {
 #[cfg(target_os = "windows")]
 impl KvStore for RegistryKv {
     fn write(&self, key: &str, value: &str) -> Result<()> {
-        use winreg::enums::*;
         use winreg::RegKey;
+        use winreg::enums::*;
 
         let path = self.full_path(key);
         let path = path.trim_start_matches("HKCU\\");
@@ -59,8 +59,8 @@ impl KvStore for RegistryKv {
     }
 
     fn read(&self, key: &str) -> Result<String> {
-        use winreg::enums::*;
         use winreg::RegKey;
+        use winreg::enums::*;
 
         let path = self.full_path(key);
         let path = path.trim_start_matches("HKCU\\");
@@ -71,11 +71,11 @@ impl KvStore for RegistryKv {
     }
 
     fn watch(&self, key: &str) -> Result<flume::Receiver<()>> {
-        use winreg::enums::*;
-        use winreg::RegKey;
         use windows::Win32::System::Registry::{
-            HKEY, RegNotifyChangeKeyValue, REG_NOTIFY_CHANGE_LAST_SET,
+            HKEY, REG_NOTIFY_CHANGE_LAST_SET, RegNotifyChangeKeyValue,
         };
+        use winreg::RegKey;
+        use winreg::enums::*;
 
         let path = self.full_path(key);
         let path_owned = path.trim_start_matches("HKCU\\").to_string();
@@ -124,8 +124,8 @@ impl KvStore for RegistryKv {
     }
 
     fn delete(&self, key: &str) -> Result<()> {
-        use winreg::enums::*;
         use winreg::RegKey;
+        use winreg::enums::*;
         let path = self.full_path(key);
         let path = path.trim_start_matches("HKCU\\");
         tracing::debug!(key = path, "registry delete");
@@ -141,7 +141,9 @@ impl KvStore for RegistryKv {
         let path = self.full_path(key);
         tracing::debug!(key = %path, "registry write via reg.exe");
         let out = std::process::Command::new(reg_exe())
-            .args(["add", &path, "/v", "value", "/t", "REG_SZ", "/d", value, "/f"])
+            .args([
+                "add", &path, "/v", "value", "/t", "REG_SZ", "/d", value, "/f",
+            ])
             .output()?;
 
         if !out.status.success() {
@@ -173,7 +175,7 @@ impl KvStore for RegistryKv {
             .find(|l| l.contains("REG_SZ"))
             .and_then(|l| l.splitn(3, "REG_SZ").nth(1))
             .map(|s| s.trim().to_string())
-            .ok_or_else(|| anyhow!("value not found in key '{}'", path))
+            .ok_or_else(|| anyhow::anyhow!("value not found in key '{}'", path))
     }
 
     fn watch(&self, key: &str) -> Result<flume::Receiver<()>> {
@@ -200,7 +202,10 @@ impl KvStore for RegistryKv {
 
                 if !out.status.success() {
                     let stderr = String::from_utf8_lossy(&out.stderr);
-                    if out.stdout.is_empty() || stderr.contains("unable to find") || stderr.contains("ERROR_FILE_NOT_FOUND") {
+                    if out.stdout.is_empty()
+                        || stderr.contains("unable to find")
+                        || stderr.contains("ERROR_FILE_NOT_FOUND")
+                    {
                         // key may not exist yet, retry
                         tracing::trace!(key = %path, "watch: key not yet, retrying");
                         continue;
@@ -209,13 +214,12 @@ impl KvStore for RegistryKv {
                     break;
                 }
 
-                let current = String::from_utf8(out.stdout).ok()
-                    .and_then(|s| {
-                        s.lines()
-                            .find(|l| l.contains("REG_SZ"))
-                            .and_then(|l| l.splitn(3, "REG_SZ").nth(1))
-                            .map(|v| v.trim().to_string())
-                    });
+                let current = String::from_utf8(out.stdout).ok().and_then(|s| {
+                    s.lines()
+                        .find(|l| l.contains("REG_SZ"))
+                        .and_then(|l| l.splitn(3, "REG_SZ").nth(1))
+                        .map(|v| v.trim().to_string())
+                });
 
                 if current != last {
                     tracing::debug!(key = %path, "watch: key changed");
@@ -238,7 +242,10 @@ impl KvStore for RegistryKv {
             .args(["delete", &path, "/f"])
             .output()?;
         if !out.status.success() {
-            bail!("reg.exe delete failed: {}", String::from_utf8_lossy(&out.stderr));
+            bail!(
+                "reg.exe delete failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
         }
         Ok(())
     }

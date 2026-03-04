@@ -1,13 +1,16 @@
 use crate::align_buffer::AlignedBuffer;
 
+use crate::transport::base::{
+    MessageSink, MessageSource, NoOpInitializer, TopologyRegistry, Transport, TransportAcceptor,
+    TransportConnector, TransportPerWorkerBuilder,
+};
+use crate::transport::impls::peer::config::PeerConfig;
+use crate::transport::impls::peer::handle::{PeerSink, PeerSource};
+use crate::transport::impls::peer::implementation::Peer;
 use crate::transport::stream::{Acceptor, AcceptorBuilder, AsyncStream, Connector};
+use local_sync::mpsc;
 use std::io;
 use std::sync::Arc;
-use local_sync::mpsc;
-use crate::transport::impls::peer::handle::{PeerSink, PeerSource};
-use crate::transport::base::{MessageSink, MessageSource, NoOpInitializer, TopologyRegistry, Transport, TransportAcceptor, TransportPerWorkerBuilder, TransportConnector};
-use crate::transport::impls::peer::config::PeerConfig;
-use crate::transport::impls::peer::implementation::Peer;
 
 pub struct StreamTransport<S: AsyncStream> {
     pub stream: S,
@@ -36,7 +39,6 @@ impl<A: Acceptor> TransportAcceptor<PeerSink, PeerSource> for GenericStreamAccep
         };
         Ok(transport)
     }
-
 }
 
 pub struct GenericStreamBuilder<B: AcceptorBuilder> {
@@ -53,7 +55,9 @@ impl<B: AcceptorBuilder> GenericStreamBuilder<B> {
     }
 }
 
-impl<B: AcceptorBuilder> TransportPerWorkerBuilder<PeerSink, PeerSource> for GenericStreamBuilder<B> {
+impl<B: AcceptorBuilder> TransportPerWorkerBuilder<PeerSink, PeerSource>
+    for GenericStreamBuilder<B>
+{
     type Transport = StreamTransport<B::Stream>;
     type Acceptor = GenericStreamAcceptor<B::Acceptor>;
     type Initializer = NoOpInitializer;
@@ -61,9 +65,8 @@ impl<B: AcceptorBuilder> TransportPerWorkerBuilder<PeerSink, PeerSource> for Gen
     async fn bind(
         self,
         core_id: usize,
-        registry: Option<&Arc<dyn TopologyRegistry>>
-    ) -> io::Result<Self::Acceptor>  {
-
+        registry: Option<&Arc<dyn TopologyRegistry>>,
+    ) -> io::Result<Self::Acceptor> {
         let actual_addr = self.inner_builder.local_addr()?.to_string();
 
         let acceptor = self.inner_builder.bind().await?;

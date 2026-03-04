@@ -1,4 +1,3 @@
-use crate::utils::set_thread_high_priority;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::OnceLock;

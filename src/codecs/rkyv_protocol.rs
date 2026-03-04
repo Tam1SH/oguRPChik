@@ -1,15 +1,15 @@
 use crate::align_buffer::AlignedBuffer;
 use crate::codecs::base::{Envelope, MessageCodec};
+use crate::server::{DefaultVecAlloc, HasDefaultAllocator};
+use crate::tpc_pool::TpcPool;
+use crate::transport::base::BufferAllocator;
 use anyhow::Result;
-use rkyv::api::high::{to_bytes_in, HighSerializer, HighValidator};
+use rkyv::api::high::{HighSerializer, HighValidator, to_bytes_in};
 use rkyv::bytecheck::CheckBytes;
 use rkyv::rancor::Error;
 use rkyv::ser::allocator::ArenaHandle;
 use rkyv::util::AlignedVec;
-use rkyv::{access, deserialize, Archive, Serialize};
-use crate::server::{DefaultVecAlloc, HasDefaultAllocator};
-use crate::tpc_pool::TpcPool;
-use crate::transport::base::BufferAllocator;
+use rkyv::{Archive, Serialize, access, deserialize};
 
 #[derive(Archive, Serialize)]
 pub(crate) enum RkyvEnvelope<Req, Res> {
@@ -50,7 +50,6 @@ impl<T> ArchivedBounds for T where
 pub struct RkyvCodec<Req, Res> {
     _phantom: std::marker::PhantomData<(Req, Res)>,
 }
-
 
 impl<Req, Res> MessageCodec for RkyvCodec<Req, Res>
 where
@@ -125,5 +124,3 @@ impl BufferAllocator for RkyvAllocator {
 impl HasDefaultAllocator for AlignedBuffer {
     type Alloc = RkyvAllocator;
 }
-
-

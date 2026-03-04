@@ -1,15 +1,15 @@
-use std::marker::PhantomData;
-use crate::client_per_core::{ClientPerCore, ResponseGuard};
+use crate::client_per_core::{ClientConfig, ClientPerCore, ResponseGuard};
 use crate::codecs::base::MessageCodec;
-use crate::runtime;
-use crate::transport::stream::Connector;
-use anyhow::{anyhow, Result};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-use tracing::{debug, error, info, instrument, warn};
 use crate::discovery::Topology;
+use crate::runtime;
 use crate::server::HasDefaultAllocator;
 use crate::transport::base::{MessageSink, MessageSource, TransportBuilder, TransportConnector};
+use anyhow::{Result, anyhow};
+use compio::time::timeout;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
+use tracing::{debug, error, info, instrument, warn};
 
 #[derive(Clone, Copy, Debug)]
 pub enum Priority {
@@ -37,7 +37,6 @@ impl<C: MessageCodec, P: AsRef<[u8]> + Send + 'static> Clone for Client<C, P> {
     }
 }
 
-
 impl<C, P> Client<C, P>
 where
     C: MessageCodec<Dest = P> + 'static,
@@ -52,7 +51,7 @@ where
             expected_codec = %C::kind()
         )
     )]
-    pub async fn connect<T>(transport: T, topology: Topology) -> Result<Self>
+    pub async fn connect<T>(config: ClientConfig, transport: T, topology: Topology) -> Result<Self>
     where
         T: TransportBuilder<P>,
     {
@@ -103,11 +102,11 @@ where
 
         info!("All connectors prepared, initiating connect_internal");
 
-        match Self::connect_internal(connectors, num_cores).await {
+        match Self::connect_internal(connectors, num_cores, config).await {
             Ok(client) => {
                 info!("Client successfully connected to all cores");
                 Ok(client)
-            },
+            }
             Err(e) => {
                 error!(error = %e, "Internal connection failed");
                 Err(e)
@@ -117,14 +116,14 @@ where
     #[instrument(skip(connectors))]
     async fn connect_internal<Conn, Si, So>(
         connectors: Vec<Conn>,
-        num_cores: usize
+        num_cores: usize,
+        config: ClientConfig,
     ) -> Result<Self>
     where
         Si: MessageSink<Payload = C::Dest> + Clone + 'static,
         So: MessageSource<Payload = C::Dest> + 'static,
         Conn: TransportConnector<Si, So>,
     {
-
         runtime::init(num_cores);
 
         let mut workers = Vec::with_capacity(num_cores);
@@ -135,14 +134,21 @@ where
             workers.push(worker_tx);
 
             let sync_tx = init_tx.clone();
-
+            let cfg = config.clone();
             runtime::spawn_on(core_id, move || async move {
-
                 let connect_res = async {
-                    let transport = connector.connect().await?;
-                    ClientPerCore::<C, Si, So, <C::Dest as HasDefaultAllocator>::Alloc>::connect(
-                        transport
+                    let connect_future = async {
+                        let transport = connector.connect().await?;
+                        ClientPerCore::<C, Si, So, <C::Dest as HasDefaultAllocator>::Alloc>::connect(
+                            transport, cfg.clone()
+                        ).await
+                    };
+
+                    timeout(
+                        Duration::from_secs(cfg.timeout_seconds),
+                        connect_future
                     ).await
+                        .map_err(|_| anyhow!("Connection timeout after {} seconds", cfg.timeout_seconds))?
                 }.await;
 
                 match connect_res {
@@ -150,9 +156,7 @@ where
                         debug!(core_id, "Worker connected successfully");
                         let _ = sync_tx.send_async(Ok(core_id)).await;
 
-
                         while let Ok(msg) = worker_rx.recv_async().await {
-
                             let res = client.call(msg.req).await;
                             if msg.resp_tx.send(res).is_err() {
                                 warn!(
@@ -195,10 +199,9 @@ where
     }
 
     pub async fn call(&self, req: C::Request) -> Result<ResponseGuard<C::Dest, C>> {
-        
         let idx = self.rr_idx.fetch_add(1, Ordering::Relaxed) % self.workers.len();
         let tx = &self.workers[idx];
-        
+
         let (resp_tx, resp_rx) = oneshot::channel();
 
         if let Err(e) = tx.send_async(CallRequest { req, resp_tx }).await {

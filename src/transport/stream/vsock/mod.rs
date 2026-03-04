@@ -2,17 +2,17 @@ pub mod general;
 #[cfg(unix)]
 pub mod linux;
 #[cfg(windows)]
-pub mod windows;
-#[cfg(windows)]
 pub mod utils;
+#[cfg(windows)]
+pub mod windows;
 
-use std::fmt::Display;
 use crate::transport::stream::vsock::general::{VListener, VStream};
 use crate::transport::stream::{Acceptor, AcceptorBuilder, Connector, Splitable};
+use compio::BufResult;
 use compio::buf::{IoBuf, IoBufMut};
 use compio::io::{AsyncRead, AsyncWrite};
-use compio::BufResult;
 use socket2::SockAddr;
+use std::fmt::Display;
 use std::io;
 use std::net::ToSocketAddrs;
 use uuid::Uuid;
@@ -22,7 +22,6 @@ pub enum VsockTarget {
     Cid(u32),
     Guid(Uuid),
 }
-
 
 pub struct VsockConnector {
     pub target: VsockTarget,
@@ -48,7 +47,6 @@ impl Acceptor for VListener {
     async fn accept(&self) -> io::Result<(Self::Stream, SockAddr)> {
         Ok(self.accept().await?)
     }
-
 }
 
 pub struct VsockAcceptorBuilder {

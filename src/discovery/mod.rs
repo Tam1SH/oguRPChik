@@ -1,10 +1,10 @@
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use crate::discovery::kv::{KvStore, default_kv};
+use crate::transport::base::TopologyRegistry;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use crate::discovery::kv::{default_kv, KvStore};
-use crate::transport::base::TopologyRegistry;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 pub mod kv;
 
@@ -34,10 +34,7 @@ impl Topology {
         Self::resolve(service_name, &default_kv()?)
     }
 
-    pub fn watch(
-        service_name: &str,
-        kv: Arc<dyn KvStore>,
-    ) -> anyhow::Result<flume::Receiver<()>> {
+    pub fn watch(service_name: &str, kv: Arc<dyn KvStore>) -> anyhow::Result<flume::Receiver<()>> {
         kv.watch(&format!("Services\\{}", service_name))
     }
 }
@@ -60,7 +57,7 @@ impl Drop for ServiceRegistration {
 
 #[cfg(all(target_os = "windows", feature = "vsock"))]
 pub fn register_vm(vm_name: &str, kv: &dyn KvStore) -> anyhow::Result<()> {
-    use crate::transport::stream::vsock::utils::{guid_to_uuid, get_best_vmid};
+    use crate::transport::stream::vsock::utils::{get_best_vmid, guid_to_uuid};
     let vmid = get_best_vmid()?;
     let uuid = guid_to_uuid(vmid);
     kv.write(&format!("Hosts\\{}", vm_name), &uuid.to_string())?;
@@ -124,7 +121,7 @@ impl RpcTopologyRegistryBuilder {
             Some(name) => {
                 let kv = match self.kv {
                     Some(kv) => kv,
-                    None => Arc::new(default_kv()?)
+                    None => Arc::new(default_kv()?),
                 };
 
                 Some((name, kv))
@@ -154,7 +151,11 @@ impl RpcTopologyRegistry {
     }
 
     pub async fn ready(&self) -> (Topology, Option<ServiceRegistration>) {
-        let rx = self.rx.lock().unwrap().take()
+        let rx = self
+            .rx
+            .lock()
+            .unwrap()
+            .take()
             .expect("ready() called more than once");
         let topology = rx.await.expect("Topology sender dropped");
         let registration = self.registration.lock().unwrap().take();
@@ -165,7 +166,9 @@ impl RpcTopologyRegistry {
         let expected = self.expected_connects.load(Ordering::Acquire);
         if expected > 0 && self.endpoints.len() == expected {
             if let Some(tx) = self.tx.lock().unwrap().take() {
-                let map = self.endpoints.iter()
+                let map = self
+                    .endpoints
+                    .iter()
                     .map(|r| (*r.key(), r.value().clone()))
                     .collect();
 
@@ -197,9 +200,7 @@ impl Clone for RpcTopologyRegistry {
     fn clone(&self) -> Self {
         let (tx, rx) = oneshot::channel();
         Self {
-            expected_connects: AtomicUsize::new(
-                self.expected_connects.load(Ordering::Relaxed)
-            ),
+            expected_connects: AtomicUsize::new(self.expected_connects.load(Ordering::Relaxed)),
             transport_kind: self.transport_kind.clone(),
             codec_kind: self.codec_kind.clone(),
             endpoints: DashMap::new(),
@@ -221,6 +222,10 @@ impl TopologyRegistry for RpcTopologyRegistry {
         self.try_send_topology();
     }
 
-    fn transport_name(&self) -> &str { &self.transport_kind }
-    fn codec_name(&self) -> &str { &self.codec_kind }
+    fn transport_name(&self) -> &str {
+        &self.transport_kind
+    }
+    fn codec_name(&self) -> &str {
+        &self.codec_kind
+    }
 }

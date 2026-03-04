@@ -1,8 +1,8 @@
-use std::marker::PhantomData;
-use serde::{Deserialize, Serialize};
-use crate::codecs::base::{Envelope, MessageCodec};
 use crate::align_buffer::AlignedBuffer;
+use crate::codecs::base::{Envelope, MessageCodec};
 use crate::codecs::serde_compatible::serde_format::SerdeFormat;
+use serde::{Deserialize, Serialize};
+use std::marker::PhantomData;
 
 #[derive(Serialize, Deserialize)]
 enum WireEnvelope<Req, Res> {
@@ -29,7 +29,9 @@ where
 
     type Dest = AlignedBuffer;
 
-    fn decode(data: &[u8]) -> anyhow::Result<Envelope<Self::RequestView<'_>, Self::ResponseView<'_>>> {
+    fn decode(
+        data: &[u8],
+    ) -> anyhow::Result<Envelope<Self::RequestView<'_>, Self::ResponseView<'_>>> {
         let wire: WireEnvelope<Req, Res> = F::deserialize(data)?;
 
         match wire {
@@ -39,7 +41,10 @@ where
         }
     }
 
-    fn encode(msg: Envelope<Self::Request, Self::Response>, dest: &mut Self::Dest) -> anyhow::Result<()> {
+    fn encode(
+        msg: Envelope<Self::Request, Self::Response>,
+        dest: &mut Self::Dest,
+    ) -> anyhow::Result<()> {
         dest.0.clear();
 
         let wire = match msg {

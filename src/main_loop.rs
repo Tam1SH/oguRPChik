@@ -1,16 +1,10 @@
-use crate::align_buffer::AlignedBuffer;
 use crate::codecs::base::{Envelope, MessageCodec};
-use crate::tpc_pool::TpcPool;
-use compio::buf::IoBuf;
-use std::collections::HashMap;
 use std::rc::Rc;
 
-use dashmap::DashMap;
-use std::sync::Arc;
-use tracing::{error, info};
 use crate::service_handler::ServiceHandler;
-use crate::transport::base::{BufferAllocator, MessageSink, MessageSource, Transport};
-use crate::discovery::Topology;
+use crate::transport::base::{BufferAllocator, MessageSink, MessageSource};
+use dashmap::DashMap;
+use tracing::{error, info};
 
 pub trait SessionConfig {
     type Codec: MessageCodec<Dest = Self::Payload>;
@@ -34,22 +28,23 @@ pub async fn run_session<C, H, Sink, Source>(
     sink: Sink,
     mut source: Source,
     pending: Rc<DashMap<u64, oneshot::Sender<C::Payload>>>,
-)
-where
+) where
     C: SessionConfig,
     H: ServiceHandler<C::Codec>,
     Sink: MessageSink<Payload = C::Payload>,
-    Source: MessageSource<Payload = C::Payload>
+    Source: MessageSource<Payload = C::Payload>,
 {
     enum OnRequestAction<C: SessionConfig> {
-        SendResponse { id: u64, resp: <<C as SessionConfig>::Codec as MessageCodec>::Response },
+        SendResponse {
+            id: u64,
+            resp: <<C as SessionConfig>::Codec as MessageCodec>::Response,
+        },
         DoNothing,
     }
 
     info!("entering main loop");
 
     while let Some(raw) = source.recv().await {
-        
         let response_id = match C::Codec::decode(raw.as_ref()) {
             Ok(Envelope::Response { id, .. }) => Some(id),
             _ => None,
@@ -57,19 +52,16 @@ where
 
         if let Some(id) = response_id {
             if let Some((_, tx)) = pending.remove(&id) {
-                
                 let _ = tx.send(raw);
             }
-            continue; 
+            continue;
         }
 
         let action = match C::Codec::decode(raw.as_ref()) {
-            Ok(Envelope::Request { id, payload }) => {
-                match handler.on_request(payload).await {
-                    Ok(resp) => OnRequestAction::SendResponse { id, resp },
-                    Err(_) => OnRequestAction::<C>::DoNothing,
-                }
-            }
+            Ok(Envelope::Request { id, payload }) => match handler.on_request(payload).await {
+                Ok(resp) => OnRequestAction::SendResponse { id, resp },
+                Err(_) => OnRequestAction::<C>::DoNothing,
+            },
             Ok(Envelope::Event { payload }) => {
                 let _ = handler.on_request(payload).await;
                 OnRequestAction::DoNothing
@@ -81,10 +73,10 @@ where
             _ => unreachable!("Response handled above"),
         };
 
-        
         if let OnRequestAction::SendResponse { id, resp } = action {
-            
+            #[allow(type_alias_bounds)]
             type Env<C: MessageCodec> = Envelope<C::Request, C::Response>;
+
             let size_hint = size_of::<Env<C::Codec>>() * 2;
 
             let mut out_buf = C::Alloc::allocate(size_hint);

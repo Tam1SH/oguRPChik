@@ -1,11 +1,11 @@
 use crate::transport::stream::Splitable;
+use crate::transport::stream::vsock::VsockTarget;
+use compio::BufResult;
 use compio::buf::{IoBuf, IoBufMut};
 use compio::io::{AsyncRead, AsyncWrite};
-use compio::BufResult;
 use socket2::SockAddr;
 use std::io;
 use tracing::{debug, error, info, instrument, trace};
-use crate::transport::stream::vsock::VsockTarget;
 
 #[derive(Clone)]
 pub enum VStream {
@@ -29,7 +29,6 @@ impl Splitable for VStream {
 }
 
 impl VStream {
-
     pub async fn connect_loopback(port: u32) -> io::Result<Self> {
         #[cfg(unix)]
         {
@@ -45,16 +44,22 @@ impl VStream {
         {
             let cid = match target {
                 VsockTarget::Cid(c) => c,
-                VsockTarget::Guid(_) => return Err(io::Error::new(io::ErrorKind::InvalidInput, "UUID not supported on Unix")),
+                VsockTarget::Guid(_) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "UUID not supported on Unix",
+                    ));
+                }
             };
-            crate::transport::stream::vsock::linux::VsockStream::connect(cid, port).await
+            crate::transport::stream::vsock::linux::VsockStream::connect(cid, port)
+                .await
                 .map(Self::Vsock)
         }
 
         #[cfg(windows)]
         {
-            use crate::transport::stream::vsock::windows::ToServiceId;
             use crate::transport::stream::vsock::utils::uuid_to_guid;
+            use crate::transport::stream::vsock::windows::ToServiceId;
             let (vm_guid, service_id) = match target {
                 VsockTarget::Cid(cid) => {
                     let g = match cid {
@@ -68,7 +73,8 @@ impl VStream {
                 VsockTarget::Guid(u) => (uuid_to_guid(u), port.to_guid()),
             };
 
-            crate::transport::stream::vsock::windows::HvStream::connect(vm_guid, service_id).await
+            crate::transport::stream::vsock::windows::HvStream::connect(vm_guid, service_id)
+                .await
                 .map(Self::Hv)
         }
     }
@@ -145,10 +151,14 @@ impl VListener {
         #[cfg(windows)]
         {
             Ok(Self::Hv(
-                crate::transport::stream::vsock::windows::HvListener::bind(VsockTarget::Cid(0), port)?,
+                crate::transport::stream::vsock::windows::HvListener::bind(
+                    VsockTarget::Cid(0),
+                    port,
+                )?,
             ))
         }
-        #[cfg(unix)] {
+        #[cfg(unix)]
+        {
             Ok(Self::Vsock(
                 crate::transport::stream::vsock::linux::VsockListener::bind_loopback(port)?,
             ))
@@ -166,7 +176,7 @@ impl VListener {
             Self::Vsock(l) => {
                 let (stream, addr) = l.accept().await?;
                 Ok((VStream::Vsock(stream), addr))
-            },
+            }
         }
     }
 }

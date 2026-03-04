@@ -2,27 +2,31 @@
 #[cfg(test)]
 mod tests {
 
-    use ogurpchik::transport::stream::adapters::tcp::TcpTransport;
-    use std::ops::Deref;
-    use std::time::Duration;
-    use rkyv::{Archive, Deserialize, Serialize};
-    use tracing::error;
     use ogurpchik::codecs::rkyv_protocol::RkyvCodec;
     use ogurpchik::codecs::serde_compatible::bitcode::BitcodeCodec;
+    use ogurpchik::node::Node;
     use ogurpchik::service_handler::ServiceHandler;
     use ogurpchik::transport::base::TransportBuilder;
     use ogurpchik::transport::impls::peer::config::PeerConfig;
     use ogurpchik::transport::stream::adapters::shm::ShmTransport;
+    use ogurpchik::transport::stream::adapters::tcp::TcpTransport;
     use ogurpchik::transport::stream::adapters::vsock::{VsockAddr, VsockTransport};
-    use ogurpchik::node::Node;
+    use rkyv::{Archive, Deserialize, Serialize};
+    use std::ops::Deref;
+    use std::time::Duration;
+    use tracing::error;
 
-    #[derive(Archive, Deserialize, Serialize, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+    #[derive(
+        Archive, Deserialize, Serialize, Debug, PartialEq, serde::Deserialize, serde::Serialize,
+    )]
     #[rkyv(compare(PartialEq), derive(Debug, PartialEq, Eq))]
     pub enum Request {
         Ping,
     }
 
-    #[derive(Archive, Deserialize, Serialize, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+    #[derive(
+        Archive, Deserialize, Serialize, Debug, PartialEq, serde::Deserialize, serde::Serialize,
+    )]
     #[rkyv(compare(PartialEq), derive(Debug, PartialEq, Eq))]
     pub enum Response {
         Pong,
@@ -37,7 +41,6 @@ mod tests {
             }
         }
     }
-
 
     impl ServiceHandler<BitcodeCodec<Request, Response>> for EchoHandler {
         async fn on_request<'a>(&self, req: Request) -> anyhow::Result<Response> {
@@ -63,12 +66,11 @@ mod tests {
         }};
     }
 
-
     #[compio::test]
     async fn test_rpc_tcp() -> anyhow::Result<()> {
         let _ = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::TRACE)
-        .try_init();
+            .with_max_level(tracing::Level::TRACE)
+            .try_init();
         let transport = TcpTransport::new("127.0.0.1".to_string());
 
         let res = rpc_call!(transport, RkyvCodec<Request, Response>, EchoHandler, Request::Ping);

@@ -1,7 +1,7 @@
-use std::fmt::Display;
 use crate::transport::stream::{Acceptor, AcceptorBuilder, Connector, Splitable};
 use compio::net::{TcpListener, TcpStream};
 use socket2::SockAddr;
+use std::fmt::Display;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
 

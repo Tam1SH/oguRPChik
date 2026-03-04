@@ -1,4 +1,3 @@
-
 #[cfg(feature = "bitcode-codec")]
 pub mod bitcode;
 

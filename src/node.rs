@@ -1,13 +1,14 @@
+use crate::client::Client;
+use crate::client_per_core::ClientConfig;
+use crate::codecs::base::MessageCodec;
+use crate::discovery::kv::{KvStore, default_kv};
+use crate::discovery::{RpcTopologyRegistry, ServiceRegistration, Topology};
+use crate::server::{HasDefaultAllocator, setup};
+use crate::service_handler::ServiceHandler;
+use crate::transport::base::TransportBuilder;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use tracing::{debug, info, instrument};
-use crate::client::Client;
-use crate::codecs::base::MessageCodec;
-use crate::discovery::kv::{default_kv, KvStore};
-use crate::discovery::{RpcTopologyRegistry, ServiceRegistration, Topology};
-use crate::server::{setup, HasDefaultAllocator};
-use crate::service_handler::ServiceHandler;
-use crate::transport::base::TransportBuilder;
 
 /// High-level builder for RPC nodes.
 ///
@@ -91,6 +92,7 @@ pub struct ServeConfig<H, T, Codec> {
 pub struct ConnectConfig<T, Codec> {
     transport: T,
     wait_for: Option<String>,
+    config: Option<ClientConfig>,
     _codec: PhantomData<Codec>,
 }
 
@@ -141,6 +143,7 @@ impl<S> Node<S, NoConnect> {
                 transport,
                 wait_for: None,
                 _codec: PhantomData,
+                config: None,
             },
             kv: self.kv,
         }
@@ -159,8 +162,15 @@ impl<S, T, Codec> Node<S, ConnectConfig<T, Codec>> {
         self.connect.wait_for = Some(service_name.into());
         self
     }
-}
 
+    pub fn timeout(mut self, timeout_in_seconds: u64) -> Self {
+        let mut cfg = self.connect.config.unwrap_or_default();
+        cfg.timeout_seconds = timeout_in_seconds;
+        self.connect.config = Some(cfg);
+
+        self
+    }
+}
 
 impl<H, ST, SC, SCodec, CCodec, P> Node<ServeConfig<H, ST, SCodec>, ConnectConfig<SC, CCodec>>
 where
@@ -185,16 +195,19 @@ where
             self.serve.handler,
             self.serve.publish_as,
             self.kv.clone(),
-        ).await?;
+        )
+        .await?;
 
-        let topology = resolve_remote(
-            self.connect.wait_for.as_deref(),
-            local_topology,
-            &self.kv,
-        ).await?;
+        let topology =
+            resolve_remote(self.connect.wait_for.as_deref(), local_topology, &self.kv).await?;
 
         info!("Connecting client");
-        let client = Client::<CCodec, P>::connect(self.connect.transport, topology).await?;
+        let client = Client::<CCodec, P>::connect(
+            self.connect.config.unwrap_or_default(),
+            self.connect.transport,
+            topology,
+        )
+        .await?;
         info!("Node fully started");
         Ok((client, guard))
     }
@@ -219,11 +232,11 @@ where
             self.serve.handler,
             self.serve.publish_as,
             self.kv,
-        ).await?;
+        )
+        .await?;
         Ok(guard)
     }
 }
-
 
 impl<T, Codec, P> Node<NoServe, ConnectConfig<T, Codec>>
 where
@@ -242,13 +255,18 @@ where
             self.connect.wait_for.as_deref(),
             Topology::default(),
             &self.kv,
-        ).await?;
+        )
+        .await?;
 
-        let client = Client::<Codec, P>::connect(self.connect.transport, topology).await?;
+        let client = Client::<Codec, P>::connect(
+            self.connect.config.unwrap_or_default(),
+            self.connect.transport,
+            topology,
+        )
+        .await?;
         info!("Node connected");
         Ok(client)
     }
-
 }
 
 async fn start_server<H, T, Codec>(
@@ -278,7 +296,8 @@ where
             .run()
             .await
             .expect("Server error");
-    }).detach();
+    })
+    .detach();
 
     info!("Waiting for server to become ready");
     let result = registry.ready().await;

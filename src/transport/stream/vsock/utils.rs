@@ -1,7 +1,7 @@
 use super::*;
-use uuid::Uuid;
 use ::windows::core::GUID;
 use serde::Deserialize;
+use uuid::Uuid;
 
 pub fn uuid_to_guid(u: Uuid) -> GUID {
     let fields = u.as_fields();
@@ -13,20 +13,25 @@ pub fn guid_to_uuid(u: GUID) -> Uuid {
 }
 
 pub fn get_best_vmid() -> std::io::Result<GUID> {
-
     let vms = match enumerate_compute_systems("{}") {
         Ok(v) => v,
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-
             return get_wsl_vmid_by_reg()
-                .and_then(|opt| opt.ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "No VM found in registry")))
+                .and_then(|opt| {
+                    opt.ok_or_else(|| {
+                        std::io::Error::new(std::io::ErrorKind::NotFound, "No VM found in registry")
+                    })
+                })
                 .map(uuid_to_guid);
         }
         Err(e) => return Err(e),
     };
 
     if vms.is_empty() {
-        return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "No compute systems found"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "No compute systems found",
+        ));
     }
 
     if let Some(wsl) = vms.iter().find(|vm| vm.owner == "WSL") {
@@ -100,7 +105,6 @@ fn enumerate_compute_systems(query: &str) -> std::io::Result<Vec<ComputeSystem>>
         if hr != 0 {
             let err = Error::from_raw_os_error(hr);
             if hr == 0x8037011Bu32 as i32 {
-
                 return Err(Error::new(ErrorKind::PermissionDenied, err));
             }
             return Err(err);
@@ -149,5 +153,3 @@ pub fn get_wsl_vmid() -> std::io::Result<Option<Uuid>> {
     }
     get_wsl_vmid_by_reg()
 }
-
-

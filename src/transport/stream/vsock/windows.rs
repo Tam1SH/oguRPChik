@@ -1,22 +1,24 @@
+use crate::transport::stream::vsock::VsockTarget;
+use crate::transport::stream::vsock::utils::uuid_to_guid;
+use compio::BufResult;
 use compio::buf::{IntoInner, IoBuf, IoBufMut};
 use compio::driver::op::{Accept, Connect, Recv, Send};
 use compio::driver::{AsFd, BorrowedFd};
 use compio::io::{AsyncRead, AsyncWrite};
-use compio::runtime::{submit, Attacher};
-use compio::BufResult;
+use compio::runtime::{Attacher, submit};
 use socket2::{Domain, Protocol, SockAddr, SockAddrStorage, Socket, Type};
 use std::io;
 use std::os::windows::io::{AsRawSocket, FromRawSocket, OwnedSocket};
-use windows::core::GUID;
-use windows::Win32::Foundation::{DuplicateHandle, DUPLICATE_SAME_ACCESS, HANDLE};
+use windows::Win32::Foundation::{DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE};
 use windows::Win32::Networking::WinSock::{
-    self, bind, listen, ADDRESS_FAMILY, AF_HYPERV, SOCKADDR, SOCKET_ERROR,
-    SOL_SOCKET, SOMAXCONN, SO_UPDATE_ACCEPT_CONTEXT,
+    self, ADDRESS_FAMILY, AF_HYPERV, SO_UPDATE_ACCEPT_CONTEXT, SOCKADDR, SOCKET_ERROR, SOL_SOCKET,
+    SOMAXCONN, bind, listen,
 };
-use windows::Win32::System::Hypervisor::{HV_GUID_ZERO, HV_GUID_CHILDREN, HV_PROTOCOL_RAW, HV_GUID_VSOCK_TEMPLATE, SOCKADDR_HV};
+use windows::Win32::System::Hypervisor::{
+    HV_GUID_CHILDREN, HV_GUID_VSOCK_TEMPLATE, HV_GUID_ZERO, HV_PROTOCOL_RAW, SOCKADDR_HV,
+};
 use windows::Win32::System::Threading::GetCurrentProcess;
-use crate::transport::stream::vsock::utils::uuid_to_guid;
-use crate::transport::stream::vsock::VsockTarget;
+use windows::core::GUID;
 
 #[derive(Clone)]
 pub struct HvStream {
@@ -112,7 +114,6 @@ pub struct HvListener {
 }
 
 impl HvListener {
-    
     pub async fn accept(&self) -> io::Result<(HvStream, SockAddr)> {
         let accept_socket = create_hv_socket()?;
         let op = Accept::new(HvHandle(self.inner.clone()), accept_socket);
@@ -149,7 +150,12 @@ impl HvListener {
         let hv_addr = create_hv_sockaddr(vm_guid, port.to_guid());
 
         unsafe {
-            if bind(raw_fd, &hv_addr as *const _ as *const SOCKADDR, size_of::<SOCKADDR_HV>() as i32) == SOCKET_ERROR {
+            if bind(
+                raw_fd,
+                &hv_addr as *const _ as *const SOCKADDR,
+                size_of::<SOCKADDR_HV>() as i32,
+            ) == SOCKET_ERROR
+            {
                 return Err(io::Error::last_os_error());
             }
             if listen(raw_fd, SOMAXCONN as i32) == SOCKET_ERROR {
@@ -157,9 +163,10 @@ impl HvListener {
             }
         }
 
-        Ok(Self { inner: Attacher::new(OwnedSocket::from(socket))? })
+        Ok(Self {
+            inner: Attacher::new(OwnedSocket::from(socket))?,
+        })
     }
-
 }
 
 fn create_hv_socket() -> io::Result<Socket> {

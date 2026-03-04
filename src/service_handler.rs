@@ -1,4 +1,3 @@
-
 use crate::codecs::base::MessageCodec;
 
 pub trait ServiceHandler<C: MessageCodec>: Clone + Send + Sync + 'static {

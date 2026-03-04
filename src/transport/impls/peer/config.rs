@@ -14,7 +14,6 @@ impl Default for PeerConfig {
     }
 }
 
-
 impl PeerConfig {
     pub fn for_priority(priority: Priority) -> Self {
         match priority {

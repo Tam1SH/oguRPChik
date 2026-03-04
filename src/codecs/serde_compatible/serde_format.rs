@@ -1,7 +1,7 @@
 use anyhow::Result;
 use rkyv::util::AlignedVec;
 use serde::{Deserialize, Serialize};
-use std::io::{Write, Result as IoResult};
+use std::io::{Result as IoResult, Write};
 
 pub struct AlignedWriter<'a, const A: usize>(pub &'a mut AlignedVec<A>);
 

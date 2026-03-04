@@ -1,6 +1,6 @@
+use crate::align_buffer::AlignedBuffer;
 use local_sync::mpsc::bounded::Tx;
 use smallvec::SmallVec;
-use crate::align_buffer::AlignedBuffer;
 
 use crate::transport::base::{MessageSink, MessageSource};
 

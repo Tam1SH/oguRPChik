@@ -16,7 +16,6 @@ thread_local! {
 pub struct TpcPool;
 
 impl TpcPool {
-
     pub fn init(config: PoolConfig) {
         POOL.with(|p| {
             *p.borrow_mut() = InnerPool::new(config);
@@ -71,7 +70,6 @@ impl Default for PoolConfig {
 }
 
 impl PoolConfig {
-
     pub fn light() -> Self {
         Self {
             header_max_count: 64,
@@ -79,12 +77,30 @@ impl PoolConfig {
             ema_alpha: 0.1,
             ema_threshold_factor: 2.0,
             buckets: vec![
-                BucketConfig { size: 64, max_count: 64 },
-                BucketConfig { size: 512, max_count: 64 },
-                BucketConfig { size: 1024, max_count: 64 },
-                BucketConfig { size: 4096, max_count: 32 },
-                BucketConfig { size: 16384, max_count: 16 },
-                BucketConfig { size: 65536, max_count: 8 },
+                BucketConfig {
+                    size: 64,
+                    max_count: 64,
+                },
+                BucketConfig {
+                    size: 512,
+                    max_count: 64,
+                },
+                BucketConfig {
+                    size: 1024,
+                    max_count: 64,
+                },
+                BucketConfig {
+                    size: 4096,
+                    max_count: 32,
+                },
+                BucketConfig {
+                    size: 16384,
+                    max_count: 16,
+                },
+                BucketConfig {
+                    size: 65536,
+                    max_count: 8,
+                },
             ],
         }
     }
@@ -96,13 +112,34 @@ impl PoolConfig {
             ema_alpha: 0.1,
             ema_threshold_factor: 3.0,
             buckets: vec![
-                BucketConfig { size: 128, max_count: 128 },
-                BucketConfig { size: 512, max_count: 128 },
-                BucketConfig { size: 1024, max_count: 128 },
-                BucketConfig { size: 4096, max_count: 64 },
-                BucketConfig { size: 16384, max_count: 64 },
-                BucketConfig { size: 65536, max_count: 32 },
-                BucketConfig { size: 131072, max_count: 16 },
+                BucketConfig {
+                    size: 128,
+                    max_count: 128,
+                },
+                BucketConfig {
+                    size: 512,
+                    max_count: 128,
+                },
+                BucketConfig {
+                    size: 1024,
+                    max_count: 128,
+                },
+                BucketConfig {
+                    size: 4096,
+                    max_count: 64,
+                },
+                BucketConfig {
+                    size: 16384,
+                    max_count: 64,
+                },
+                BucketConfig {
+                    size: 65536,
+                    max_count: 32,
+                },
+                BucketConfig {
+                    size: 131072,
+                    max_count: 16,
+                },
             ],
         }
     }
@@ -114,12 +151,30 @@ impl PoolConfig {
             ema_alpha: 0.05,
             ema_threshold_factor: 5.0,
             buckets: vec![
-                BucketConfig { size: 1024, max_count: 1024 },
-                BucketConfig { size: 8192, max_count: 512 },
-                BucketConfig { size: 65536, max_count: 256 },
-                BucketConfig { size: 262144, max_count: 128 },
-                BucketConfig { size: 524288, max_count: 64 },
-                BucketConfig { size: 1048576, max_count: 32 },
+                BucketConfig {
+                    size: 1024,
+                    max_count: 1024,
+                },
+                BucketConfig {
+                    size: 8192,
+                    max_count: 512,
+                },
+                BucketConfig {
+                    size: 65536,
+                    max_count: 256,
+                },
+                BucketConfig {
+                    size: 262144,
+                    max_count: 128,
+                },
+                BucketConfig {
+                    size: 524288,
+                    max_count: 64,
+                },
+                BucketConfig {
+                    size: 1048576,
+                    max_count: 32,
+                },
             ],
         }
     }
@@ -157,7 +212,9 @@ impl InnerPool {
     }
 
     pub fn acquire_header_raw(&mut self, msg_len: usize) -> BytesMut {
-        let mut h = self.headers.pop()
+        let mut h = self
+            .headers
+            .pop()
             .unwrap_or_else(|| BytesMut::with_capacity(self.config.header_initial_cap));
         h.clear();
         if msg_len > 0 {
@@ -178,8 +235,11 @@ impl InnerPool {
     }
 
     pub fn acquire_body(&mut self, needed_cap: usize) -> AlignedBuffer {
-
-        let bucket_idx = self.config.buckets.iter().position(|b| b.size >= needed_cap);
+        let bucket_idx = self
+            .config
+            .buckets
+            .iter()
+            .position(|b| b.size >= needed_cap);
 
         if let Some(idx) = bucket_idx {
             if let Some(buf) = self.body_buckets[idx].pop() {
@@ -198,8 +258,8 @@ impl InnerPool {
         let alpha = self.config.ema_alpha;
         self.ema_size = (self.ema_size as f32 * (1.0 - alpha) + cap as f32 * alpha) as usize;
 
-        if cap > (self.ema_size as f32 * self.config.ema_threshold_factor) as usize
-            && cap > 131072 {
+        if cap > (self.ema_size as f32 * self.config.ema_threshold_factor) as usize && cap > 131072
+        {
             return;
         }
 
@@ -220,7 +280,6 @@ impl InnerPool {
     }
 }
 
-
 pub enum Mixed {
     Bytes(BytesMut),
     AlignedBuffer(AlignedBuffer),
@@ -237,9 +296,11 @@ impl IoBuf for Mixed {
 
 impl SetLen for Mixed {
     unsafe fn set_len(&mut self, len: usize) {
-        match self {
-            Mixed::Bytes(b) => b.set_len(len),
-            Mixed::AlignedBuffer(b) => b.set_len(len),
+        unsafe {
+            match self {
+                Mixed::Bytes(b) => b.set_len(len),
+                Mixed::AlignedBuffer(b) => b.set_len(len),
+            }
         }
     }
 }
