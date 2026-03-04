@@ -4,7 +4,6 @@ use crate::codecs::base::MessageCodec;
 use crate::runtime;
 use crate::transport::stream::Connector;
 use anyhow::{anyhow, Result};
-use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tracing::{debug, error, info, instrument, warn};
@@ -25,8 +24,8 @@ struct CallRequest<C: MessageCodec, P: AsRef<[u8]> + Send + 'static> {
 }
 
 pub struct Client<C: MessageCodec, P: AsRef<[u8]> + Send + 'static> {
-    workers: Rc<Vec<flume::Sender<CallRequest<C, P>>>>,
-    rr_idx: Rc<AtomicUsize>,
+    workers: Arc<Vec<flume::Sender<CallRequest<C, P>>>>,
+    rr_idx: Arc<AtomicUsize>,
 }
 
 impl<C: MessageCodec, P: AsRef<[u8]> + Send + 'static> Clone for Client<C, P> {
@@ -190,8 +189,8 @@ where
         info!(num_workers = workers.len(), "Client pool initialized");
 
         Ok(Self {
-            workers: Rc::new(workers),
-            rr_idx: Rc::new(AtomicUsize::new(0)),
+            workers: Arc::new(workers),
+            rr_idx: Arc::new(AtomicUsize::new(0)),
         })
     }
 
