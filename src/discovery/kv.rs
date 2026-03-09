@@ -19,11 +19,21 @@ fn reg_exe() -> &'static str {
     }
 }
 
+fn reg_cmd() -> std::process::Command {
+    let mut cmd = std::process::Command::new(reg_exe());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    cmd
+}
+
 impl RegistryKv {
     pub fn new(base: impl Into<String>) -> Result<Self> {
         let base = base.into();
 
-        let out = std::process::Command::new(reg_exe())
+        let out = reg_cmd()
             .args(["add", &base, "/f"])
             .output()?;
 
@@ -140,17 +150,12 @@ impl KvStore for RegistryKv {
     fn write(&self, key: &str, value: &str) -> Result<()> {
         let path = self.full_path(key);
         tracing::debug!(key = %path, "registry write via reg.exe");
-        let out = std::process::Command::new(reg_exe())
-            .args([
-                "add", &path, "/v", "value", "/t", "REG_SZ", "/d", value, "/f",
-            ])
+        let out = reg_cmd()
+            .args(["add", &path, "/v", "value", "/t", "REG_SZ", "/d", value, "/f"])
             .output()?;
 
         if !out.status.success() {
-            bail!(
-                "reg.exe add failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
+            bail!("reg.exe add failed: {}", String::from_utf8_lossy(&out.stderr));
         }
         Ok(())
     }
@@ -158,15 +163,12 @@ impl KvStore for RegistryKv {
     fn read(&self, key: &str) -> Result<String> {
         let path = self.full_path(key);
         tracing::debug!(key = %path, "registry read via reg.exe");
-        let out = std::process::Command::new(reg_exe())
+        let out = reg_cmd()
             .args(["query", &path, "/v", "value"])
             .output()?;
 
         if !out.status.success() {
-            bail!(
-                "reg.exe query failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
+            bail!("reg.exe query failed: {}", String::from_utf8_lossy(&out.stderr));
         }
 
         let stdout = String::from_utf8(out.stdout)?;
@@ -188,7 +190,7 @@ impl KvStore for RegistryKv {
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(200));
 
-                let out = std::process::Command::new(reg_exe())
+                let out = reg_cmd()
                     .args(["query", &path, "/v", "value"])
                     .output();
 
@@ -206,7 +208,6 @@ impl KvStore for RegistryKv {
                         || stderr.contains("unable to find")
                         || stderr.contains("ERROR_FILE_NOT_FOUND")
                     {
-                        // key may not exist yet, retry
                         tracing::trace!(key = %path, "watch: key not yet, retrying");
                         continue;
                     }
@@ -238,14 +239,11 @@ impl KvStore for RegistryKv {
     fn delete(&self, key: &str) -> Result<()> {
         let path = self.full_path(key);
         tracing::debug!(key = %path, "registry delete via reg.exe");
-        let out = std::process::Command::new(reg_exe())
+        let out = reg_cmd()
             .args(["delete", &path, "/f"])
             .output()?;
         if !out.status.success() {
-            bail!(
-                "reg.exe delete failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
+            bail!("reg.exe delete failed: {}", String::from_utf8_lossy(&out.stderr));
         }
         Ok(())
     }
