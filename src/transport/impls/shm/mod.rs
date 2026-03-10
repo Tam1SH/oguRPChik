@@ -1,10 +1,7 @@
 mod reactor;
 
-use crate::align_buffer::AlignedBuffer;
-use crate::server::HasDefaultAllocator;
-use crate::tpc_pool::TpcPool;
 use crate::transport::base::{
-    BufferAllocator, MessageSink, MessageSource, NoOpInitializer, RawMessageSink, RawMessageSource,
+    MessageSink, MessageSource, RawMessageSink, RawMessageSource,
     TopologyRegistry, Transport, TransportAcceptor, TransportConnector, TransportPerWorkerBuilder,
 };
 use crate::transport::impls::shm::reactor::GlobalReactor;
@@ -16,59 +13,77 @@ use iceoryx2::port::listener::Listener;
 use iceoryx2::port::notifier::Notifier;
 use iceoryx2::port::publisher::Publisher;
 use iceoryx2::port::subscriber::Subscriber;
-use iceoryx2::prelude::{Service, WaitSet, WaitSetAttachmentId, WaitSetGuard, ipc};
+use iceoryx2::prelude::{WaitSet, WaitSetAttachmentId, WaitSetGuard, ipc};
 use iceoryx2::sample::Sample;
+use iceoryx2::service::ipc_threadsafe::Service;
 use iceoryx2::service::port_factory::publish_subscribe::PortFactory;
 use iceoryx2::waitset::WaitSetBuilder;
 use std::cell::RefCell;
 use std::future::poll_fn;
 use std::io;
+use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use tracing::{debug, error, info, trace, warn};
+use crate::codecs::base::{BorrowedBuf, OwnedBuf};
+ 
+pub struct IceoryxPayload(Sample<Service, [u8], ()>);
+
+impl AsRef<[u8]> for IceoryxPayload {
+    fn as_ref(&self) -> &[u8] {
+        self.0.payload()
+    }
+}
 
 fn port_service_factory(
-    node: &Node<ipc::Service>,
+    node: &Node<Service>,
     name: &str,
-) -> Result<PortFactory<ipc::Service, [u8], ()>, Error> {
+) -> Result<PortFactory<Service, [u8], ()>, Error> {
     node.service_builder(&name.try_into()?)
         .publish_subscribe::<[u8]>()
+        .max_publishers(4)
+        .max_subscribers(4)
         .open_or_create()
         .map_err(|e| anyhow::anyhow!("Failed to open service {}: {:?}", name, e))
 }
 
 fn port_event_factory(
-    node: &Node<ipc::Service>,
+    node: &Node<Service>,
     base_name: &str,
-) -> Result<iceoryx2::service::port_factory::event::PortFactory<ipc::Service>, Error> {
+) -> Result<iceoryx2::service::port_factory::event::PortFactory<Service>, Error> {
     let ev_name = format!("{}_events", base_name);
     node.service_builder(&ev_name.as_str().try_into()?)
         .event()
+        .max_notifiers(4)
+        .max_listeners(4)
         .open_or_create()
+
         .map_err(|e| anyhow::anyhow!("Failed to open event service {}: {:?}", ev_name, e))
 }
 
-pub struct IceoryxConnector {
+pub struct IceoryxConnector<B> {
     service_name: String,
+    phantom_data: PhantomData<B>
 }
 
-impl IceoryxConnector {
+impl<B: OwnedBuf> IceoryxConnector<B> {
     pub fn new(service_name: &str) -> Self {
         Self {
             service_name: service_name.to_string(),
+            phantom_data: PhantomData
         }
     }
 }
 
-impl TransportConnector<IceoryxSinkAdapter, IceoryxSourceAdapter> for IceoryxConnector {
+impl<B: OwnedBuf> TransportConnector<IceoryxSinkAdapter<B>, IceoryxSourceAdapter> for IceoryxConnector<B> {
     type Transport = IceoryxTransport;
 
     async fn connect(&self) -> anyhow::Result<Self::Transport> {
         debug!(service = %self.service_name, "IceoryxConnector: connecting to service");
 
         let node = NodeBuilder::new()
-            .create::<ipc::Service>()
+            .create::<Service>()
             .map_err(|e| anyhow::anyhow!("Iceoryx Node error: {:?}", e))?;
 
         let c2s_name = format!("{}_c2s", self.service_name);
@@ -100,18 +115,19 @@ impl TransportConnector<IceoryxSinkAdapter, IceoryxSourceAdapter> for IceoryxCon
     }
 }
 
-pub struct IceoryxAcceptor {
+pub struct IceoryxAcceptor<B> {
     service_name: String,
+    phantom_data: PhantomData<B>
 }
 
-impl TransportAcceptor<IceoryxSinkAdapter, IceoryxSourceAdapter> for IceoryxAcceptor {
+impl<B: OwnedBuf> TransportAcceptor<IceoryxSinkAdapter<B>, IceoryxSourceAdapter> for IceoryxAcceptor<B> {
     type Transport = IceoryxTransport;
 
     async fn accept(&self) -> anyhow::Result<Self::Transport> {
         debug!(service = %self.service_name, "IceoryxAcceptor: accepting (SERVER mode)");
 
         let node = NodeBuilder::new()
-            .create::<ipc::Service>()
+            .create::<Service>()
             .map_err(|e| anyhow::anyhow!("Iceoryx Node error: {:?}", e))?;
 
         let c2s_name = format!("{}_c2s", self.service_name);
@@ -143,22 +159,23 @@ impl TransportAcceptor<IceoryxSinkAdapter, IceoryxSourceAdapter> for IceoryxAcce
     }
 }
 
-pub struct IceoryxBuilder {
+pub struct IceoryxBuilder<B> {
     base_name: String,
+    phantom: PhantomData<B>,
 }
 
-impl IceoryxBuilder {
+impl<B: OwnedBuf> IceoryxBuilder<B> {
     pub fn new(service_name: &str) -> Self {
         Self {
             base_name: service_name.to_string(),
+            phantom: PhantomData,
         }
     }
 }
 
-impl TransportPerWorkerBuilder<IceoryxSinkAdapter, IceoryxSourceAdapter> for IceoryxBuilder {
+impl<B: OwnedBuf> TransportPerWorkerBuilder<IceoryxSinkAdapter<B>, IceoryxSourceAdapter> for IceoryxBuilder<B> {
     type Transport = IceoryxTransport;
-    type Acceptor = IceoryxAcceptor;
-    type Initializer = NoOpInitializer;
+    type Acceptor = IceoryxAcceptor<B>;
     async fn bind(
         self,
         core_id: usize,
@@ -173,31 +190,32 @@ impl TransportPerWorkerBuilder<IceoryxSinkAdapter, IceoryxSourceAdapter> for Ice
             reg.register(core_id, service_name.clone());
         }
 
-        Ok(IceoryxAcceptor { service_name })
+        Ok(IceoryxAcceptor { service_name, phantom_data: PhantomData })
     }
 }
 
-pub struct IceoryxSink<S: Service>(pub Publisher<S, [u8], ()>);
-pub struct IceoryxSource<S: Service> {
-    pub sub: Subscriber<S, [u8], ()>,
+pub struct IceoryxSink(pub Publisher<Service, [u8], ()>);
+pub struct IceoryxSource {
+    pub sub: Subscriber<Service, [u8], ()>,
     pub id: u64,
 }
 
-pub struct IceoryxRawSink {
-    pub publisher: Publisher<ipc::Service, [u8], ()>,
-    pub notifier: Notifier<ipc::Service>,
+pub struct IceoryxRawSink<Tx> {
+    pub publisher: Publisher<Service, [u8], ()>,
+    pub notifier: Notifier<Service>,
+    pub phantom_data: PhantomData<Tx>
 }
 
-impl RawMessageSink for IceoryxRawSink {
-    type Message = AlignedBuffer;
+impl<Tx: OwnedBuf> RawMessageSink for IceoryxRawSink<Tx> {
+    type Message = Tx;
 
     fn poll_send(
         &self,
         _cx: &mut Context<'_>,
-        data: &mut Option<AlignedBuffer>,
+        data: &mut Option<Tx>,
     ) -> Poll<anyhow::Result<()>> {
         let msg = data.as_ref().expect("logic error: no data");
-        let bytes = msg.0.as_slice();
+        let bytes = msg.as_ref();
 
         match self.publisher.loan_slice(bytes.len()) {
             Ok(mut sample_mut) => {
@@ -208,16 +226,19 @@ impl RawMessageSink for IceoryxRawSink {
                     return Poll::Ready(Err(anyhow::anyhow!("{:?}", e)));
                 }
 
-                // match self.notifier.notify() {
-                //     Ok(0) => {
-                //         warn!("no one listen");
-                //     }
-                //     Ok(_) => {}
-                //     Err(e) => {
-                //         error!(error = ?e, "Failed to send Iceoryx notification");
-                //         return Poll::Ready(Err(anyhow::anyhow!("{:?}", e)));
-                //     }
-                // }
+                //TODO: notifications should be batched to avoid hammering the reactor —
+                //      consider coalescing multiple sends into a single notify call
+                match self.notifier.notify() {
+                    Ok(0) => {
+
+                        warn!(id = ?self.publisher.id(), "no one listen");
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        error!(error = ?e, "Failed to send Iceoryx notification");
+                        return Poll::Ready(Err(anyhow::anyhow!("{:?}", e)));
+                    }
+                }
 
                 trace!(len = bytes.len(), "Iceoryx message sent successfully");
                 Poll::Ready(Ok(()))
@@ -236,21 +257,21 @@ impl RawMessageSink for IceoryxRawSink {
 }
 
 pub struct IceoryxRawSource {
-    pub subscriber: Subscriber<ipc::Service, [u8], ()>,
-    pub attachment_id: WaitSetAttachmentId<ipc::Service>,
+    pub subscriber: Subscriber<Service, [u8], ()>,
+    pub attachment_id: WaitSetAttachmentId<Service>,
 }
 
 impl RawMessageSource for IceoryxRawSource {
-    type Message = AlignedBuffer;
+    type Message = IceoryxPayload;
 
-    fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<anyhow::Result<AlignedBuffer>> {
+    fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<anyhow::Result<Self::Message>> {
         for _ in 0..100_000 {
             if let Ok(Some(sample)) = self.subscriber.receive() {
                 trace!(
                     len = sample.len(),
                     "Iceoryx message received (spin-loop path)"
                 );
-                return Poll::Ready(Ok(self.extract_buffer(sample)));
+                return Poll::Ready(Ok(IceoryxPayload(sample)));
             }
 
             std::hint::spin_loop();
@@ -264,7 +285,7 @@ impl RawMessageSource for IceoryxRawSource {
                 len = sample.len(),
                 "Iceoryx message received (after-registration path)"
             );
-            return Poll::Ready(Ok(self.extract_buffer(sample)));
+            return Poll::Ready(Ok(IceoryxPayload(sample)));
         }
 
         trace!("No data available after spin, falling asleep");
@@ -272,22 +293,12 @@ impl RawMessageSource for IceoryxRawSource {
     }
 }
 
-impl IceoryxRawSource {
-    fn extract_buffer(&self, sample: Sample<ipc::Service, [u8], ()>) -> AlignedBuffer {
-        let mut aligned_buf = TpcPool::acquire_body(sample.len());
-        unsafe {
-            std::ptr::copy_nonoverlapping(sample.as_ptr(), aligned_buf.as_mut_ptr(), sample.len());
-            aligned_buf.set_len(sample.len());
-        }
-        aligned_buf
-    }
+
+pub struct IceoryxSinkAdapter<Tx> {
+    pub inner: Rc<IceoryxRawSink<Tx>>,
 }
 
-pub struct IceoryxSinkAdapter {
-    pub inner: Rc<IceoryxRawSink>,
-}
-
-impl Clone for IceoryxSinkAdapter {
+impl<Tx> Clone for IceoryxSinkAdapter<Tx> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
@@ -295,10 +306,10 @@ impl Clone for IceoryxSinkAdapter {
     }
 }
 
-impl MessageSink for IceoryxSinkAdapter {
-    type Payload = AlignedBuffer;
+impl<Tx: OwnedBuf> MessageSink for IceoryxSinkAdapter<Tx> {
+    type Payload = Tx;
 
-    async fn send(&self, data: AlignedBuffer) -> anyhow::Result<()> {
+    async fn send(&self, data: Tx) -> anyhow::Result<()> {
         let mut slot = Some(data);
         poll_fn(|cx| self.inner.poll_send(cx, &mut slot)).await
     }
@@ -309,28 +320,29 @@ pub struct IceoryxSourceAdapter {
 }
 
 impl MessageSource for IceoryxSourceAdapter {
-    type Payload = AlignedBuffer;
-    async fn recv(&mut self) -> Option<AlignedBuffer> {
+    type Payload = IceoryxPayload;
+    async fn recv(&mut self) -> Option<Self::Payload> {
         poll_fn(|cx| self.inner.poll_recv(cx)).await.ok()
     }
 }
 
 pub struct IceoryxTransport {
-    pub publisher: Publisher<ipc::Service, [u8], ()>,
-    pub subscriber: Subscriber<ipc::Service, [u8], ()>,
-    pub notifier: Notifier<ipc::Service>,
-    pub listener: Listener<ipc::Service>,
-    pub _node: Node<ipc::Service>,
+    pub publisher: Publisher<Service, [u8], ()>,
+    pub subscriber: Subscriber<Service, [u8], ()>,
+    pub notifier: Notifier<Service>,
+    pub listener: Listener<Service>,
+    pub _node: Node<Service>,
 }
 
-impl Transport<IceoryxSinkAdapter, IceoryxSourceAdapter> for IceoryxTransport {
-    fn decompose(self) -> anyhow::Result<(IceoryxSinkAdapter, IceoryxSourceAdapter)> {
+impl<Tx: OwnedBuf> Transport<IceoryxSinkAdapter<Tx>, IceoryxSourceAdapter> for IceoryxTransport {
+    fn decompose(self) -> anyhow::Result<(IceoryxSinkAdapter<Tx>, IceoryxSourceAdapter)> {
         let reactor = GlobalReactor::get();
         let attachment_id = reactor.attach(self.listener);
 
         let raw_sink = IceoryxRawSink {
             publisher: self.publisher,
             notifier: self.notifier,
+            phantom_data: PhantomData,
         };
 
         let raw_source = IceoryxRawSource {
@@ -354,16 +366,10 @@ mod tests {
     use futures::future::join;
     use std::future::ready;
     use std::time::{Duration, Instant};
+    use crate::codecs::serde_protocol::VecBuf;
 
-    use crate::utils::current_cpu_core;
-
-    fn create_payload(data: &[u8]) -> AlignedBuffer {
-        let mut buf = TpcPool::acquire_body(data.len());
-        unsafe {
-            std::ptr::copy_nonoverlapping(data.as_ptr(), buf.as_mut_ptr(), data.len());
-            buf.set_len(data.len());
-        }
-        buf
+    fn create_payload(data: &[u8]) -> VecBuf {
+        Vec::from(data).into()
     }
 
     fn gen_service_name(suffix: &str) -> String {
@@ -372,14 +378,14 @@ mod tests {
 
     #[compio::test]
     async fn test_iceoryx_ping_pong_single_threaded() -> anyhow::Result<()> {
-        tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::TRACE)
-            .init();
+        // tracing_subscriber::fmt()
+        //     .with_max_level(tracing::Level::TRACE)
+        //     .init();
 
         let base_name = gen_service_name("pp");
         let service_full_name = format!("{}_0", base_name);
 
-        let builder = IceoryxBuilder::new(&base_name);
+        let builder = IceoryxBuilder::<VecBuf>::new(&base_name);
         let acceptor = builder.bind(0, None).await?;
 
         let server_fut = async {
@@ -398,7 +404,7 @@ mod tests {
         };
 
         let client_fut = async {
-            let connector = IceoryxConnector::new(&service_full_name);
+            let connector = IceoryxConnector::<VecBuf>::new(&service_full_name);
             let transport = connector.connect().await?;
             let (sink, mut source) = transport.decompose()?;
 

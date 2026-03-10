@@ -2,12 +2,16 @@ use compio::io::{AsyncRead, AsyncWrite};
 use socket2::SockAddr;
 use std::fmt::Display;
 use std::io;
-
+use compio::buf::{IoBuf, IoBufMut, SetLen};
+use crate::codecs::base::OwnedBuf;
 pub mod adapters;
 #[cfg(feature = "tcp")]
 pub mod tcp;
 #[cfg(feature = "vsock")]
 pub mod vsock;
+
+pub trait StreamBuf: OwnedBuf + SetLen + IoBufMut + IoBuf {}
+impl<T: OwnedBuf + SetLen + IoBufMut + IoBuf> StreamBuf for T {}
 
 pub trait AsyncStream: Splitable + AsyncRead + AsyncWrite + Unpin + Clone + 'static {}
 
@@ -36,3 +40,4 @@ pub trait AcceptorBuilder: Send + Sync + 'static {
     fn local_addr(&self) -> io::Result<impl Display>;
     fn kind(&self) -> &'static str;
 }
+

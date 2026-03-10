@@ -26,9 +26,8 @@ oneshot = "0.1.13"
 smallvec = "1.15.1"
 local-sync = "0.1.1"
 lazy_static = "1.5.0"
-async-trait = "0.1.89"
 
-rkyv = { version = "0.8.14", features = ["bytecheck", "std"] }
+rkyv = { version = "0.8.14", features = ["bytecheck", "std"], optional = true }
 serde = { version = "1.0.228", features = ["derive"] }
 bitcode = { version = "0.6.9", features = ["serde"], optional = true }
 
@@ -38,6 +37,8 @@ dhat = { version = "0.3", optional = true }
 
 uuid = { version = "1.20.0", features = ["v4", "serde"] }
 serde_json = "1.0.149"
+object-pool = "0.6.0"
+anymap = "0.12.1"
 
 
 [target.'cfg(windows)'.dependencies]
@@ -55,7 +56,7 @@ libc = "1.0.0-alpha.2"
 
 [features]
 
-rkyv-codec = []
+rkyv-codec = ["dep:rkyv"]
 bitcode-codec = ["dep:bitcode"]
 
 shm = ["dep:iceoryx2"]

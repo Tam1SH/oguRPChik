@@ -1,9 +1,8 @@
-use crate::main_loop::{SessionConfig, run_session};
-use crate::runtime;
-use crate::service_handler::ServiceHandler;
+use crate::low::runtime;
+use crate::high::service_handler::ServiceHandler;
 use crate::transport::base::{
     MessageSink, MessageSource, TopologyRegistry, Transport, TransportAcceptor,
-    TransportPerWorkerBuilder, WorkerInitializer,
+    TransportPerWorkerBuilder
 };
 use anyhow::Result;
 use dashmap::DashMap;
@@ -12,12 +11,13 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{error, info};
+use crate::low::main_loop::{run_session, SessionConfig};
 
 pub struct ServerWorker<C: SessionConfig, H: ServiceHandler<C::Codec>> {
     phantom: PhantomData<(C, H)>,
 }
 
-impl<C: SessionConfig + 'static, H: ServiceHandler<C::Codec> + Clone + Send + 'static>
+impl<C: SessionConfig, H: ServiceHandler<C::Codec>>
     ServerWorker<C, H>
 {
     pub fn spawn<B, Sink, Source>(
@@ -25,11 +25,13 @@ impl<C: SessionConfig + 'static, H: ServiceHandler<C::Codec> + Clone + Send + 's
         builder: B,
         handler: H,
         registry: Option<Arc<dyn TopologyRegistry>>,
+        allocator: C::Alloc
     ) -> Result<()>
     where
-        B: TransportPerWorkerBuilder<Sink, Source> + Send + 'static,
-        Sink: MessageSink<Payload = C::Payload> + 'static,
-        Source: MessageSource<Payload = C::Payload> + 'static,
+        B: TransportPerWorkerBuilder<Sink, Source>,
+        Sink: MessageSink<Payload = C::OutPayload>,
+        Source: MessageSource<Payload = C::RxPayload>,
+        <C as SessionConfig>::Alloc: Send
     {
         runtime::spawn_on(core_id, move || async move {
             let acceptor = match builder.bind(core_id, registry.as_ref()).await {
@@ -40,11 +42,9 @@ impl<C: SessionConfig + 'static, H: ServiceHandler<C::Codec> + Clone + Send + 's
                 }
             };
 
-            B::Initializer::init(core_id);
-
             info!(core_id, "Server worker listening");
-
             loop {
+                let allocator = allocator.clone();
                 match acceptor.accept().await {
                     Ok(transport) => {
                         info!("accepted new connection");
@@ -64,7 +64,7 @@ impl<C: SessionConfig + 'static, H: ServiceHandler<C::Codec> + Clone + Send + 's
 
                             let pending = Rc::new(DashMap::new());
 
-                            run_session::<C, _, _, _>(h, sink, source, pending).await;
+                            run_session::<C, _, _, _>(h, sink, source, pending, allocator).await;
                         })
                         .detach();
                     }

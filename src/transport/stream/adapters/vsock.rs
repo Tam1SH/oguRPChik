@@ -1,13 +1,16 @@
-use crate::align_buffer::AlignedBuffer;
+use std::marker::PhantomData;
+use crate::codecs::base::{BufferAllocator, HasAllocator, OwnedBuf};
 use crate::transport::base::TransportBuilder;
+use crate::transport::base::pool_config::PoolConfig;
 use crate::transport::impls::peer::adapter::{GenericStreamBuilder, GenericStreamConnector};
 use crate::transport::impls::peer::config::PeerConfig;
 use crate::transport::impls::peer::handle::{PeerSink, PeerSource};
 use crate::transport::stream::vsock::{VsockAcceptorBuilder, VsockConnector, VsockTarget};
+use crate::transport::stream::StreamBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use tracing::{debug, error, info, instrument, trace};
+use tracing::{error, info, instrument, trace};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy)]
@@ -20,7 +23,7 @@ pub enum VsockAddr {
 impl FromStr for VsockAddr {
     type Err = anyhow::Error;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        const U32_MAX_STRING: &'static str = "4294967295";
+        const U32_MAX_STRING: &str = "4294967295";
 
         if s == U32_MAX_STRING || s == "any" || s == "self" {
             Ok(Self::SelfManaged)
@@ -35,14 +38,15 @@ impl FromStr for VsockAddr {
 }
 
 #[derive(Clone)]
-pub struct VsockTransport {
+pub struct VsockTransport<B: OwnedBuf> {
     resolved_id: VsockTarget,
     base_port: u32,
     config: PeerConfig,
     port_offset: Arc<AtomicU32>,
+    _marker: PhantomData<B>,
 }
 
-impl VsockTransport {
+impl<B: OwnedBuf> VsockTransport<B> {
     pub fn server(addr: VsockAddr, base_port: u32) -> Self {
         Self::new(addr, Some(base_port))
     }
@@ -85,6 +89,7 @@ impl VsockTransport {
             base_port,
             config: PeerConfig::default(),
             port_offset: Arc::new(AtomicU32::new(0)),
+            _marker: PhantomData,
         }
     }
 
@@ -96,18 +101,19 @@ impl VsockTransport {
     }
 }
 
-impl TransportBuilder<AlignedBuffer> for VsockTransport {
-    type Si = PeerSink;
-    type So = PeerSource;
-    type Builder = GenericStreamBuilder<VsockAcceptorBuilder>;
-    type Connector = GenericStreamConnector<VsockConnector>;
+impl<B: StreamBuf + HasAllocator> TransportBuilder<B> for VsockTransport<B> {
+    type Rx = B;
+    type Si = PeerSink<B>;
+    type So = PeerSource<B>;
+    type Builder = GenericStreamBuilder<VsockAcceptorBuilder, B, <B as HasAllocator>::Alloc>;
+    type Connector = GenericStreamConnector<VsockConnector, B, <B as HasAllocator>::SharedAlloc>;
 
     fn kind(&self) -> String {
         "vsock".to_string()
     }
 
     #[instrument(skip(self), fields(cid = ?self.resolved_id, base_port = self.base_port))]
-    fn server_builder(&self) -> Self::Builder {
+    fn server_builder(&self, _: usize) -> Self::Builder {
         assert!(
             self.base_port > 0,
             "server_builder() called on client-side VsockTransport"
@@ -115,14 +121,11 @@ impl TransportBuilder<AlignedBuffer> for VsockTransport {
         let offset = self.port_offset.fetch_add(1, Ordering::SeqCst);
         let port = self.base_port + offset;
 
-        GenericStreamBuilder::new(
-            VsockAcceptorBuilder::new(self.resolved_id, port),
-            self.config.clone(),
-        )
+        GenericStreamBuilder::new(VsockAcceptorBuilder::new(self.resolved_id, port), self.config.clone(), <<B as HasAllocator>::Alloc as BufferAllocator>::get(&PoolConfig::default()))
     }
 
     #[instrument(skip(self), fields(endpoint = %endpoint, transport_default = ?self.resolved_id))]
-    fn client_connector(&self, endpoint: String) -> anyhow::Result<Self::Connector> {
+    fn client_connector(&self, endpoint: String, core_id: usize) -> anyhow::Result<Self::Connector> {
         trace!("Starting client connector resolution");
 
         let (addr_str, port_str) = endpoint.rsplit_once(':').ok_or_else(|| {
@@ -153,6 +156,7 @@ impl TransportBuilder<AlignedBuffer> for VsockTransport {
         Ok(GenericStreamConnector::new(
             VsockConnector::new(physical_target, port),
             self.config.clone(),
+            <<B as HasAllocator>::SharedAlloc as BufferAllocator>::get(&PoolConfig::default()),
         ))
     }
 }

@@ -1,15 +1,14 @@
-use crate::align_buffer::AlignedBuffer;
-use crate::codecs::base::{Envelope, MessageCodec};
-use crate::server::{DefaultVecAlloc, HasDefaultAllocator};
-use crate::tpc_pool::TpcPool;
-use crate::transport::base::BufferAllocator;
+use compio::buf::{IoBuf, IoBufMut, SetLen};
+use std::mem::MaybeUninit;
 use anyhow::Result;
 use rkyv::api::high::{HighSerializer, HighValidator, to_bytes_in};
 use rkyv::bytecheck::CheckBytes;
 use rkyv::rancor::Error;
 use rkyv::ser::allocator::ArenaHandle;
 use rkyv::util::AlignedVec;
-use rkyv::{Archive, Serialize, access, deserialize};
+use rkyv::{Archive, Serialize, access};
+use crate::codecs::base::{Envelope, HasAllocator, MessageCodec, OwnedBuf};
+use crate::pool::allocator::{SharedAllocator, TpcAllocator};
 
 #[derive(Archive, Serialize)]
 pub(crate) enum RkyvEnvelope<Req, Res> {
@@ -70,6 +69,7 @@ where
     type Dest = AlignedBuffer;
 
     fn decode(data: &[u8]) -> Result<Envelope<Self::RequestView<'_>, Self::ResponseView<'_>>> {
+
         let archived = access::<ArchivedRkyvEnvelope<Req, Res>, Error>(data)?;
 
         match archived {
@@ -111,16 +111,66 @@ where
     }
 }
 
-#[derive(Clone)]
-pub struct RkyvAllocator;
 
-impl BufferAllocator for RkyvAllocator {
-    type Payload = AlignedBuffer;
-    fn allocate(size_hint: usize) -> Self::Payload {
-        TpcPool::acquire_body(size_hint)
+
+#[derive(Default, Clone)]
+pub struct AlignedBuffer(pub AlignedVec);
+
+impl AlignedBuffer {
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self(AlignedVec::with_capacity(capacity))
+    }
+    pub fn capacity(&self) -> usize {
+        self.0.capacity()
+    }
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+    pub fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.0.as_mut_ptr()
+    }
+
+    pub fn as_ptr(&self) -> *const u8 {
+        self.0.as_ptr()
     }
 }
 
-impl HasDefaultAllocator for AlignedBuffer {
-    type Alloc = RkyvAllocator;
+
+
+impl AsRef<[u8]> for AlignedBuffer {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_slice()
+    }
+}
+
+
+impl OwnedBuf for AlignedBuffer {
+    fn with_capacity(capacity: usize) -> Self {
+        Self::with_capacity(capacity)
+    }
+
+    fn capacity(&self) -> usize {
+        Self::capacity(self)
+    }
+    fn len(&self) -> usize {
+        Self::len(self)
+    }
+    fn as_ptr(&self) -> *const u8 {
+        Self::as_ptr(self)
+    }
+    fn as_mut_ptr(&mut self) -> *mut u8 {
+        Self::as_mut_ptr(self)
+    }
+
+    fn clear(&mut self) {
+        Self::clear(self);
+    }
+}
+
+impl HasAllocator for AlignedBuffer {
+    type Alloc = TpcAllocator<AlignedBuffer>;
+    type SharedAlloc = SharedAllocator<AlignedBuffer>;
 }

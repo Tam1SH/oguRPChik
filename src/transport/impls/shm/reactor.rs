@@ -5,18 +5,19 @@ use iceoryx2::waitset::{WaitSet, WaitSetAttachmentId, WaitSetGuard};
 use std::sync::Arc;
 use std::task::Waker;
 use tracing::{debug, error, trace};
+use iceoryx2::service::ipc_threadsafe::Service;
 
 pub enum ReactorCmd {
     Attach(
-        Listener<ipc::Service>,
-        flume::Sender<WaitSetAttachmentId<ipc::Service>>,
+        Listener<Service>,
+        flume::Sender<WaitSetAttachmentId<Service>>,
     ),
 }
 
 unsafe impl Send for ReactorCmd {}
 
 pub struct GlobalReactor {
-    wakers: Arc<DashMap<WaitSetAttachmentId<ipc::Service>, Waker>>,
+    wakers: Arc<DashMap<WaitSetAttachmentId<Service>, Waker>>,
     cmd_tx: flume::Sender<ReactorCmd>,
 }
 
@@ -31,12 +32,12 @@ impl GlobalReactor {
 
     fn start() -> Arc<Self> {
         let (cmd_tx, cmd_rx) = flume::unbounded::<ReactorCmd>();
-        let wakers = Arc::new(DashMap::<WaitSetAttachmentId<ipc::Service>, Waker>::new());
+        let wakers = Arc::new(DashMap::<WaitSetAttachmentId<Service>, Waker>::new());
         let wakers_inner = wakers.clone();
 
         std::thread::spawn(move || {
             let waitset = WaitSetBuilder::new()
-                .create::<ipc::Service>()
+                .create::<Service>()
                 .expect("Failed to create Global WaitSet");
 
             let mut attachments = Vec::new();
@@ -52,7 +53,7 @@ impl GlobalReactor {
                             match waitset.attach_notification(listener_ref) {
                                 Ok(guard) => {
                                     let id = WaitSetAttachmentId::from_guard(&guard);
-                                    let guard_static: WaitSetGuard<'static, 'static, ipc::Service> =
+                                    let guard_static: WaitSetGuard<'static, 'static, Service> =
                                         unsafe { std::mem::transmute(guard) };
                                     attachments.push((boxed, guard_static));
                                     let _ = reply_tx.send(id);
@@ -78,14 +79,14 @@ impl GlobalReactor {
         Arc::new(Self { wakers, cmd_tx })
     }
 
-    pub fn register(&self, id: WaitSetAttachmentId<ipc::Service>, waker: Waker) {
+    pub fn register(&self, id: WaitSetAttachmentId<Service>, waker: Waker) {
         self.wakers.insert(id, waker);
     }
 
-    pub fn unregister(&self, id: &WaitSetAttachmentId<ipc::Service>) {
+    pub fn unregister(&self, id: &WaitSetAttachmentId<Service>) {
         self.wakers.remove(id);
     }
-    pub fn attach(&self, listener: Listener<ipc::Service>) -> WaitSetAttachmentId<ipc::Service> {
+    pub fn attach(&self, listener: Listener<Service>) -> WaitSetAttachmentId<Service> {
         let (tx, rx) = flume::bounded(1);
         self.cmd_tx.send(ReactorCmd::Attach(listener, tx)).unwrap();
         rx.recv().expect("Global Reactor died")

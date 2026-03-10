@@ -1,10 +1,10 @@
-use crate::client::Client;
-use crate::client_per_core::ClientConfig;
-use crate::codecs::base::MessageCodec;
+use crate::high::client::Client;
+use crate::low::client_per_core::ClientConfig;
+use crate::codecs::base::{BorrowedBuf, HasAllocator, MessageCodec, OwnedBuf};
 use crate::discovery::kv::{KvStore, default_kv};
 use crate::discovery::{RpcTopologyRegistry, ServiceRegistration, Topology};
-use crate::server::{HasDefaultAllocator, setup};
-use crate::service_handler::ServiceHandler;
+use crate::high::server::setup;
+use crate::high::service_handler::ServiceHandler;
 use crate::transport::base::TransportBuilder;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -15,15 +15,19 @@ use tracing::{debug, info, instrument};
 /// A `Node` can act as a server, a client, or both simultaneously.
 /// Service discovery is handled automatically via the Windows registry.
 ///
+/// ## Thread configuration
+///
+/// Single-threaded by default. Use `.threads(n)` to pin server workers to cores.
+///
 /// # Examples
 ///
 /// ## Loopback (server + client in the same process)
 ///
 /// ```rust,no_run
-/// # use ogurpchik::node::Node;
+/// # use ogurpchik::high::node::Node;
 /// # use ogurpchik::transport::stream::adapters::tcp::TcpTransport;
 /// # use ogurpchik::codecs::rkyv_protocol::RkyvCodec;
-/// # use ogurpchik::service_handler::ServiceHandler;
+/// # use ogurpchik::high::service_handler::ServiceHandler;
 /// # use rkyv::{Archive, Serialize, Deserialize};
 /// # #[derive(Archive, Serialize, Deserialize)] enum Req { Ping }
 /// # #[derive(Archive, Serialize, Deserialize)] enum Res { Pong }
@@ -33,7 +37,7 @@ use tracing::{debug, info, instrument};
 /// #     async fn on_request<'a>(&self, _: &ArchivedReq) -> anyhow::Result<Res> { Ok(Res::Pong) }
 /// # }
 /// # async fn example() -> anyhow::Result<()> {
-/// let (client, _guard) = Node::new()
+/// let (client, _guard) = Node::new()?
 ///     .serve::<MyCodec, _, _>(TcpTransport::new("127.0.0.1"), MyHandler)
 ///     .connect::<MyCodec, _>(TcpTransport::new("127.0.0.1"))
 ///     .start()
@@ -44,13 +48,25 @@ use tracing::{debug, info, instrument};
 /// # }
 /// ```
 ///
+/// ## Multi-threaded server
+///
+/// ```rust,no_run
+/// # async fn example() -> anyhow::Result<()> {
+/// let (client, _guard) = Node::new()?
+///     .threads(4)
+///     .serve::<MyCodec, _, _>(TcpTransport::new("127.0.0.1"), MyHandler)
+///     .connect::<MyCodec, _>(TcpTransport::new("127.0.0.1"))
+///     .start()
+///     .await?;
+/// # Ok(())
+/// # }
+/// ```
+///
 /// ## Serve only
 ///
 /// ```rust,no_run
-/// # use ogurpchik::node::Node;
-/// # use ogurpchik::transport::stream::adapters::tcp::TcpTransport;
 /// # async fn example() -> anyhow::Result<()> {
-/// let _guard = Node::new()
+/// let _guard = Node::new()?
 ///     .serve::<MyCodec, _, _>(TcpTransport::new("127.0.0.1"), MyHandler)
 ///     .publish("my-service")
 ///     .start()
@@ -62,10 +78,8 @@ use tracing::{debug, info, instrument};
 /// ## Connect only
 ///
 /// ```rust,no_run
-/// # use ogurpchik::node::Node;
-/// # use ogurpchik::transport::stream::adapters::tcp::TcpTransport;
 /// # async fn example() -> anyhow::Result<()> {
-/// let client = Node::new()
+/// let client = Node::new()?
 ///     .connect::<MyCodec, _>(TcpTransport::new("127.0.0.1"))
 ///     .wait_for("my-service")
 ///     .start()
@@ -77,6 +91,7 @@ pub struct Node<S, C> {
     serve: S,
     connect: C,
     kv: Arc<dyn KvStore>,
+    threads: usize,
 }
 
 pub struct NoServe;
@@ -102,6 +117,7 @@ impl Node<NoServe, NoConnect> {
             serve: NoServe,
             connect: NoConnect,
             kv: Arc::new(default_kv()?),
+            threads: 1,
         })
     }
 
@@ -111,8 +127,24 @@ impl Node<NoServe, NoConnect> {
     }
 }
 
+impl<S, C> Node<S, C> {
+    pub fn single_thread(mut self) -> Self {
+        self.threads = 1;
+        self
+    }
+
+    pub fn threads(mut self, n: usize) -> Self {
+        self.threads = n;
+        self
+    }
+}
+
 impl<C> Node<NoServe, C> {
-    pub fn serve<Codec, H, T>(self, transport: T, handler: H) -> Node<ServeConfig<H, T, Codec>, C>
+    pub fn serve<Codec, H, T>(
+        self,
+        transport: T,
+        handler: H,
+    ) -> Node<ServeConfig<H, T, Codec>, C>
     where
         Codec: MessageCodec,
         T: TransportBuilder<Codec::Dest>,
@@ -127,12 +159,17 @@ impl<C> Node<NoServe, C> {
             },
             connect: self.connect,
             kv: self.kv,
+            threads: self.threads,
         }
     }
 }
 
 impl<S> Node<S, NoConnect> {
-    pub fn connect<Codec, T>(self, transport: T) -> Node<S, ConnectConfig<T, Codec>>
+    // RxPayload убран — выводится из T::Rx везде где нужен
+    pub fn connect<Codec, T>(
+        self,
+        transport: T,
+    ) -> Node<S, ConnectConfig<T, Codec>>
     where
         Codec: MessageCodec,
         T: TransportBuilder<Codec::Dest>,
@@ -146,6 +183,7 @@ impl<S> Node<S, NoConnect> {
                 config: None,
             },
             kv: self.kv,
+            threads: self.threads,
         }
     }
 }
@@ -167,19 +205,24 @@ impl<S, T, Codec> Node<S, ConnectConfig<T, Codec>> {
         let mut cfg = self.connect.config.unwrap_or_default();
         cfg.timeout_seconds = timeout_in_seconds;
         self.connect.config = Some(cfg);
-
         self
     }
 }
 
-impl<H, ST, SC, SCodec, CCodec, P> Node<ServeConfig<H, ST, SCodec>, ConnectConfig<SC, CCodec>>
+// ── serve + connect ───────────────────────────────────────────────────────────
+
+impl<H, ST, SC, SCodec, CCodec, P>
+Node<ServeConfig<H, ST, SCodec>, ConnectConfig<SC, CCodec>>
 where
     SCodec: MessageCodec<Dest = P>,
     CCodec: MessageCodec<Dest = P>,
-    ST: TransportBuilder<SCodec::Dest> + Clone + Send + Sync + 'static,
+    ST: TransportBuilder<P> + Clone + Send + Sync + 'static,
     SC: TransportBuilder<P> + Send + Sync + 'static,
     H: ServiceHandler<SCodec> + Clone,
-    P: AsRef<[u8]> + Send + HasDefaultAllocator + 'static,
+    P: OwnedBuf + HasAllocator,
+    ST::Rx: BorrowedBuf,
+    SC::Rx: BorrowedBuf,
+    <P as HasAllocator>::SharedAlloc: Send,
 {
     #[instrument(skip(self), fields(
         serve_transport = %self.serve.transport.kind(),
@@ -188,37 +231,45 @@ where
         publish_as = ?self.serve.publish_as,
         wait_for = ?self.connect.wait_for,
     ))]
-    pub async fn start(self) -> anyhow::Result<(Client<CCodec, P>, Option<ServiceRegistration>)> {
+    pub async fn start(
+        self,
+    ) -> anyhow::Result<(Client<CCodec, P, SC::Rx>, Option<ServiceRegistration>)> {
         info!("Node starting");
+
         let (local_topology, guard) = start_server::<_, _, SCodec>(
             self.serve.transport,
             self.serve.handler,
             self.serve.publish_as,
             self.kv.clone(),
+            self.threads,
         )
-        .await?;
+            .await?;
 
         let topology =
             resolve_remote(self.connect.wait_for.as_deref(), local_topology, &self.kv).await?;
 
         info!("Connecting client");
-        let client = Client::<CCodec, P>::connect(
+        let client = Client::<CCodec, P, SC::Rx>::connect(
             self.connect.config.unwrap_or_default(),
             self.connect.transport,
             topology,
         )
-        .await?;
+            .await?;
+
         info!("Node fully started");
         Ok((client, guard))
     }
 }
 
+// ── serve only ────────────────────────────────────────────────────────────────
+
 impl<H, T, Codec> Node<ServeConfig<H, T, Codec>, NoConnect>
 where
     Codec: MessageCodec,
     T: TransportBuilder<Codec::Dest> + Clone + Send + Sync + 'static,
+    T::Rx: BorrowedBuf,
     H: ServiceHandler<Codec> + Clone,
-    <Codec as MessageCodec>::Dest: HasDefaultAllocator,
+    Codec::Dest: HasAllocator,
 {
     #[instrument(skip(self), fields(
         transport = %self.serve.transport.kind(),
@@ -232,54 +283,65 @@ where
             self.serve.handler,
             self.serve.publish_as,
             self.kv,
+            self.threads,
         )
-        .await?;
+            .await?;
         Ok(guard)
     }
 }
+
+// ── connect only ──────────────────────────────────────────────────────────────
 
 impl<T, Codec, P> Node<NoServe, ConnectConfig<T, Codec>>
 where
     Codec: MessageCodec<Dest = P>,
     T: TransportBuilder<P> + Clone,
-    P: AsRef<[u8]> + Send + HasDefaultAllocator + 'static,
+    T::Rx: BorrowedBuf,
+    P: OwnedBuf + HasAllocator + 'static,
+    <P as HasAllocator>::SharedAlloc: Send,
 {
     #[instrument(skip(self), fields(
         transport = %self.connect.transport.kind(),
         codec = %Codec::kind(),
         wait_for = ?self.connect.wait_for,
     ))]
-    pub async fn start(self) -> anyhow::Result<Client<Codec, P>> {
+    pub async fn start(self) -> anyhow::Result<Client<Codec, P, T::Rx>> {
         info!("Node starting (connect only)");
+
         let topology = resolve_remote(
             self.connect.wait_for.as_deref(),
             Topology::default(),
             &self.kv,
         )
-        .await?;
+            .await?;
 
-        let client = Client::<Codec, P>::connect(
+        let client = Client::<Codec, P, T::Rx>::connect(
             self.connect.config.unwrap_or_default(),
             self.connect.transport,
             topology,
         )
-        .await?;
+            .await?;
+
         info!("Node connected");
         Ok(client)
     }
 }
+
+// ── helpers ───────────────────────────────────────────────────────────────────
 
 async fn start_server<H, T, Codec>(
     transport: T,
     handler: H,
     publish_as: Option<String>,
     kv: Arc<dyn KvStore>,
+    num_threads: usize,
 ) -> anyhow::Result<(Topology, Option<ServiceRegistration>)>
 where
     Codec: MessageCodec,
+    Codec::Dest: HasAllocator,
     T: TransportBuilder<Codec::Dest> + Clone + Send + Sync + 'static,
+    T::Rx: BorrowedBuf,
     H: ServiceHandler<Codec> + Clone,
-    Codec::Dest: HasDefaultAllocator,
 {
     let registry = RpcTopologyRegistry::builder(transport.kind(), Codec::kind())
         .publish_as(publish_as.unwrap_or_default())
@@ -291,13 +353,13 @@ where
         setup()
             .with_transport(transport)
             .with_registry(srv_reg)
-            .single_thread()
-            .service(handler)
+            .threads(num_threads)
+            .service::<_, Codec>(handler)
             .run()
             .await
             .expect("Server error");
     })
-    .detach();
+        .detach();
 
     info!("Waiting for server to become ready");
     let result = registry.ready().await;

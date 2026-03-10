@@ -1,15 +1,10 @@
+pub mod pool_config;
+
 use std::io;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-
-pub trait WorkerInitializer {
-    fn init(core_id: usize);
-}
-
-pub struct NoOpInitializer;
-impl WorkerInitializer for NoOpInitializer {
-    fn init(_core_id: usize) {}
-}
+use crate::codecs::base::{OwnedBuf, BorrowedBuf};
+use crate::transport::base::pool_config::PoolConfig;
 
 pub trait RawMessageSink: 'static {
     type Message;
@@ -33,7 +28,7 @@ pub trait MessageSink: Clone + 'static {
 }
 
 pub trait MessageSource: 'static {
-    type Payload: AsRef<[u8]> + 'static;
+    type Payload: BorrowedBuf;
     async fn recv(&mut self) -> Option<Self::Payload>;
 }
 
@@ -45,6 +40,8 @@ pub trait TransportConnector<Sink: MessageSink, Source: MessageSource>: Send + '
     type Transport: Transport<Sink, Source>;
 
     async fn connect(&self) -> anyhow::Result<Self::Transport>;
+
+
 }
 
 pub trait TransportAcceptor<Sink: MessageSink, Source: MessageSource>: 'static {
@@ -66,25 +63,25 @@ pub trait TopologyRegistry: Send + Sync + 'static {
     fn codec_name(&self) -> &str;
 }
 
-pub trait TransportBuilder<P: AsRef<[u8]>> {
-    type Si: MessageSink<Payload = P> + 'static;
-    type So: MessageSource<Payload = P> + 'static;
+pub trait TransportBuilder<Tx: OwnedBuf>: 'static {
+    type Rx: BorrowedBuf;
+    type Si: MessageSink<Payload = Tx> + 'static;
+    type So: MessageSource<Payload = Self::Rx> + 'static;
     type Builder: TransportPerWorkerBuilder<Self::Si, Self::So>;
     type Connector: TransportConnector<Self::Si, Self::So>;
 
     fn kind(&self) -> String;
 
-    fn server_builder(&self) -> Self::Builder;
+    fn server_builder(&self, core_id: usize) -> Self::Builder;
 
-    fn client_connector(&self, endpoint: String) -> anyhow::Result<Self::Connector>;
+    fn client_connector(&self, endpoint: String, core_id: usize) -> anyhow::Result<Self::Connector>;
 }
 
 pub trait TransportPerWorkerBuilder<Sink: MessageSink, Source: MessageSource>:
-    Send + Sync + 'static
+    Send + 'static
 {
     type Transport: Transport<Sink, Source>;
     type Acceptor: TransportAcceptor<Sink, Source, Transport = Self::Transport>;
-    type Initializer: WorkerInitializer;
 
     async fn bind(
         self,
@@ -93,7 +90,5 @@ pub trait TransportPerWorkerBuilder<Sink: MessageSink, Source: MessageSource>:
     ) -> io::Result<Self::Acceptor>;
 }
 
-pub trait BufferAllocator: Clone + 'static {
-    type Payload: AsRef<[u8]> + 'static;
-    fn allocate(size_hint: usize) -> Self::Payload;
-}
+
+

@@ -1,8 +1,8 @@
-use crate::client_per_core::{ClientConfig, ClientPerCore, ResponseGuard};
-use crate::codecs::base::MessageCodec;
+use std::marker::PhantomData;
+use crate::low::client_per_core::{ClientConfig, ClientPerCore, ResponseGuard};
+use crate::codecs::base::{BorrowedBuf, BufferAllocator, HasAllocator, MessageCodec, OwnedBuf};
 use crate::discovery::Topology;
-use crate::runtime;
-use crate::server::HasDefaultAllocator;
+use crate::low::runtime;
 use crate::transport::base::{MessageSink, MessageSource, TransportBuilder, TransportConnector};
 use anyhow::{Result, anyhow};
 use compio::time::timeout;
@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tracing::{debug, error, info, instrument, warn};
+use crate::transport::base::pool_config::PoolConfig;
 
 #[derive(Clone, Copy, Debug)]
 pub enum Priority {
@@ -18,29 +19,33 @@ pub enum Priority {
     Bulk,
 }
 
-struct CallRequest<C: MessageCodec, P: AsRef<[u8]> + Send + 'static> {
+struct CallRequest<C: MessageCodec, Rx: BorrowedBuf> {
     req: C::Request,
-    resp_tx: oneshot::Sender<Result<ResponseGuard<P, C>>>,
+    resp_tx: oneshot::Sender<Result<ResponseGuard<Rx, C>>>,
 }
 
-pub struct Client<C: MessageCodec, P: AsRef<[u8]> + Send + 'static> {
-    workers: Arc<Vec<flume::Sender<CallRequest<C, P>>>>,
+pub struct Client<C: MessageCodec, Tx: OwnedBuf, Rx: BorrowedBuf> {
+    workers: Arc<Vec<flume::Sender<CallRequest<C, Rx>>>>,
     rr_idx: Arc<AtomicUsize>,
+    _phantom: PhantomData<Tx>,
 }
 
-impl<C: MessageCodec, P: AsRef<[u8]> + Send + 'static> Clone for Client<C, P> {
+impl<C: MessageCodec, Tx: OwnedBuf, Rx: BorrowedBuf> Clone for Client<C, Tx, Rx> {
     fn clone(&self) -> Self {
         Self {
             workers: self.workers.clone(),
             rr_idx: self.rr_idx.clone(),
+            _phantom: PhantomData,
         }
     }
 }
 
-impl<C, P> Client<C, P>
+impl<C, Tx, Rx> Client<C, Tx, Rx>
 where
-    C: MessageCodec<Dest = P> + 'static,
-    P: AsRef<[u8]> + Send + HasDefaultAllocator + 'static,
+    C: MessageCodec<Dest = Tx>,
+    Tx: OwnedBuf + HasAllocator,
+    Rx: BorrowedBuf,
+    <<Tx as HasAllocator>::SharedAlloc as BufferAllocator>::SendMark: Send,
 {
     #[instrument(
         level = "info",
@@ -53,7 +58,7 @@ where
     )]
     pub async fn connect<T>(config: ClientConfig, transport: T, topology: Topology) -> Result<Self>
     where
-        T: TransportBuilder<P>,
+        T: TransportBuilder<Tx, Rx = Rx>,
     {
         info!("Starting client connection process");
 
@@ -91,7 +96,7 @@ where
 
             debug!(core_id = i, endpoint = %endpoint, "Creating connector");
 
-            match transport.client_connector(endpoint.clone()) {
+            match transport.client_connector(endpoint.clone(), i) {
                 Ok(connector) => connectors.push(connector),
                 Err(e) => {
                     error!(core_id = i, endpoint = %endpoint, error = %e, "Failed to create connector");
@@ -113,6 +118,7 @@ where
             }
         }
     }
+
     #[instrument(skip(connectors))]
     async fn connect_internal<Conn, Si, So>(
         connectors: Vec<Conn>,
@@ -120,8 +126,8 @@ where
         config: ClientConfig,
     ) -> Result<Self>
     where
-        Si: MessageSink<Payload = C::Dest> + Clone + 'static,
-        So: MessageSource<Payload = C::Dest> + 'static,
+        Si: MessageSink<Payload = Tx>,
+        So: MessageSource<Payload = Rx>,
         Conn: TransportConnector<Si, So>,
     {
         runtime::init(num_cores);
@@ -130,26 +136,35 @@ where
         let (init_tx, init_rx) = flume::bounded::<Result<usize>>(num_cores);
 
         for (core_id, connector) in connectors.into_iter().enumerate() {
-            let (worker_tx, worker_rx) = flume::unbounded::<CallRequest<C, P>>();
+            let (worker_tx, worker_rx) = flume::unbounded::<CallRequest<C, Rx>>();
             workers.push(worker_tx);
 
             let sync_tx = init_tx.clone();
             let cfg = config.clone();
+
             runtime::spawn_on(core_id, move || async move {
+
+                type Alloc<Tx> = <Tx as HasAllocator>::SharedAlloc;
+                let allocator = Alloc::<Tx>::get(&PoolConfig::default());
+
                 let connect_res = async {
                     let connect_future = async {
                         let transport = connector.connect().await?;
-                        ClientPerCore::<C, Si, So, <C::Dest as HasDefaultAllocator>::Alloc>::connect(
-                            transport, cfg.clone()
-                        ).await
+                        ClientPerCore::<C, Si, So, Alloc<Tx>, Rx>::connect(
+                            transport,
+                            cfg.clone(),
+                            allocator,
+                        )
+                            .await
                     };
 
-                    timeout(
-                        Duration::from_secs(cfg.timeout_seconds),
-                        connect_future
-                    ).await
-                        .map_err(|_| anyhow!("Connection timeout after {} seconds", cfg.timeout_seconds))?
-                }.await;
+                    timeout(Duration::from_secs(cfg.timeout_seconds), connect_future)
+                        .await
+                        .map_err(|_| {
+                            anyhow!("Connection timeout after {} seconds", cfg.timeout_seconds)
+                        })?
+                }
+                    .await;
 
                 match connect_res {
                     Ok(mut client) => {
@@ -195,10 +210,11 @@ where
         Ok(Self {
             workers: Arc::new(workers),
             rr_idx: Arc::new(AtomicUsize::new(0)),
+            _phantom: PhantomData,
         })
     }
 
-    pub async fn call(&self, req: C::Request) -> Result<ResponseGuard<C::Dest, C>> {
+    pub async fn call(&self, req: C::Request) -> Result<ResponseGuard<Rx, C>> {
         let idx = self.rr_idx.fetch_add(1, Ordering::Relaxed) % self.workers.len();
         let tx = &self.workers[idx];
 

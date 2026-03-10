@@ -1,0 +1,149 @@
+use anyhow::{Context, anyhow};
+use std::marker::PhantomData;
+use std::sync::Arc;
+use std::time::Duration;
+use tracing::info;
+
+use crate::codecs::base::{BorrowedBuf, BufferAllocator, HasAllocator, MessageCodec, OwnedBuf};
+use crate::low::runtime;
+use crate::low::server_worker::ServerWorker;
+use crate::high::service_handler::ServiceHandler;
+use crate::transport::base::{
+    MessageSink, MessageSource, TopologyRegistry, TransportBuilder, TransportPerWorkerBuilder,
+};
+use crate::transport::base::pool_config::PoolConfig;
+
+pub struct NoHandler;
+pub struct NoCodec;
+pub struct NoTransport;
+pub struct NoSink;
+pub struct NoSource;
+
+pub struct ServerBuilder<H, C, T, Si, So, RxPayload> {
+    cores: usize,
+    handler: H,
+    transport: Option<T>,
+    registry: Option<Arc<dyn TopologyRegistry>>,
+    _phantom: PhantomData<(C, Si, So, RxPayload)>,
+}
+
+pub fn setup() -> ServerBuilder<NoHandler, NoCodec, NoTransport, NoSink, NoSource, ()> {
+    ServerBuilder {
+        cores: 1,
+        handler: NoHandler,
+        transport: None,
+        registry: None,
+        _phantom: PhantomData,
+    }
+}
+
+impl<H, C, T, Si, So, RxPayload> ServerBuilder<H, C, T, Si, So, RxPayload> {
+    pub fn single_thread(mut self) -> Self {
+        self.cores = 1;
+        self
+    }
+
+    pub fn threads(mut self, n: usize) -> Self {
+        self.cores = n;
+        self
+    }
+
+    pub fn with_registry(mut self, registry: Arc<dyn TopologyRegistry>) -> Self {
+        self.registry = Some(registry);
+        self
+    }
+
+    pub fn service<NewH, NewC>(
+        self,
+        handler: NewH,
+    ) -> ServerBuilder<NewH, NewC, T, Si, So, RxPayload>
+    where
+        NewH: ServiceHandler<NewC>,
+        NewC: MessageCodec,
+        NewC::Dest: HasAllocator,
+    {
+        ServerBuilder {
+            cores: self.cores,
+            handler,
+            registry: self.registry,
+            transport: self.transport,
+            _phantom: PhantomData,
+        }
+    }
+
+    pub fn with_transport<NewT, NewSi, NewSo, P, NewPayload>(
+        self,
+        transport: NewT,
+    ) -> ServerBuilder<H, C, NewT, NewSi, NewSo, NewPayload>
+    where
+        NewSi: MessageSink,
+        NewSo: MessageSource,
+        NewPayload: BorrowedBuf,
+        NewT: TransportBuilder<P, Rx = NewPayload>,
+        P: OwnedBuf,
+    {
+        ServerBuilder {
+            cores: self.cores,
+            handler: self.handler,
+            registry: self.registry,
+            transport: Some(transport),
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<H, C, T, Si, So, RxPayload> ServerBuilder<H, C, T, Si, So, RxPayload>
+where
+    C: MessageCodec,
+    C::Dest: HasAllocator + OwnedBuf,
+    H: ServiceHandler<C> + Clone + Send + 'static,
+    Si: MessageSink<Payload = C::Dest> + 'static,
+    So: MessageSource<Payload = RxPayload> + 'static,
+    T: TransportBuilder<C::Dest, Rx = RxPayload>,
+    RxPayload: BorrowedBuf,
+    <T as TransportBuilder<C::Dest>>::Builder: TransportPerWorkerBuilder<Si, So>,
+    <C::Dest as HasAllocator>::Alloc: BufferAllocator<Payload = C::Dest> + Send + 'static,
+{
+    pub async fn run(self) -> anyhow::Result<std::convert::Infallible> {
+        let transport = self.transport.ok_or_else(|| anyhow!("Transport not set"))?;
+        let registry = self.registry.ok_or_else(|| anyhow!("Registry not set"))?;
+
+        if registry.transport_name() != transport.kind() {
+            return Err(anyhow!("Registry transport mismatch"));
+        }
+
+        if registry.codec_name() != C::kind() {
+            return Err(anyhow!("Registry codec mismatch"));
+        }
+
+        runtime::init(self.cores);
+        registry.init_cores(self.cores);
+
+        info!(
+            cores = self.cores,
+            payload = std::any::type_name::<C::Dest>(),
+            "Starting RPC server workers"
+        );
+
+        type Alloc<C> = <<C as MessageCodec>::Dest as HasAllocator>::Alloc;
+
+        for core_id in 0..self.cores {
+            let h = self.handler.clone();
+            let builder = transport.server_builder(core_id);
+            let allocator = Alloc::<C>::get(&PoolConfig::default());
+
+            ServerWorker::<(C, Alloc<C>, RxPayload), H>::spawn(
+                core_id,
+                builder,
+                h,
+                Some(registry.clone()),
+                allocator,
+            )
+                .with_context(|| format!("Failed to spawn worker on core {}", core_id))?;
+        }
+
+        loop {
+            compio::time::sleep(Duration::from_secs(3600)).await;
+        }
+    }
+}

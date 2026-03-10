@@ -1,25 +1,27 @@
-use crate::codecs::base::{Envelope, MessageCodec};
+use crate::codecs::base::{BufferAllocator, OwnedBuf, Envelope, MessageCodec, BorrowedBuf};
 use std::rc::Rc;
-
-use crate::service_handler::ServiceHandler;
-use crate::transport::base::{BufferAllocator, MessageSink, MessageSource};
+use crate::high::service_handler::ServiceHandler;
+use crate::transport::base::{MessageSink, MessageSource};
 use dashmap::DashMap;
 use tracing::{error, info};
 
 pub trait SessionConfig {
-    type Codec: MessageCodec<Dest = Self::Payload>;
-    type Payload: AsRef<[u8]> + Default + 'static;
-    type Alloc: BufferAllocator<Payload = Self::Payload>;
+    type Codec: MessageCodec<Dest = Self::OutPayload>;
+    type RxPayload: BorrowedBuf;
+    type OutPayload: OwnedBuf;
+    type Alloc: BufferAllocator<Payload = Self::OutPayload>;
 }
 
-impl<P, A, Pay> SessionConfig for (P, A)
+impl<P, A, OutPayload, RxPayload> SessionConfig for (P, A, RxPayload)
 where
-    P: MessageCodec<Dest = Pay>,
-    A: BufferAllocator<Payload = Pay>,
-    Pay: AsRef<[u8]> + 'static + Default,
+    P: MessageCodec<Dest = OutPayload>,
+    A: BufferAllocator<Payload = OutPayload>,
+    OutPayload: OwnedBuf,
+    RxPayload: BorrowedBuf,
 {
     type Codec = P;
-    type Payload = Pay;
+    type RxPayload = RxPayload;
+    type OutPayload = OutPayload;
     type Alloc = A;
 }
 
@@ -27,12 +29,13 @@ pub async fn run_session<C, H, Sink, Source>(
     handler: H,
     sink: Sink,
     mut source: Source,
-    pending: Rc<DashMap<u64, oneshot::Sender<C::Payload>>>,
+    pending: Rc<DashMap<u64, oneshot::Sender<C::RxPayload>>>,
+    allocator: C::Alloc,
 ) where
     C: SessionConfig,
     H: ServiceHandler<C::Codec>,
-    Sink: MessageSink<Payload = C::Payload>,
-    Source: MessageSource<Payload = C::Payload>,
+    Sink: MessageSink<Payload = C::OutPayload>,
+    Source: MessageSource<Payload = C::RxPayload>,
 {
     enum OnRequestAction<C: SessionConfig> {
         SendResponse {
@@ -79,7 +82,7 @@ pub async fn run_session<C, H, Sink, Source>(
 
             let size_hint = size_of::<Env<C::Codec>>() * 2;
 
-            let mut out_buf = C::Alloc::allocate(size_hint);
+            let mut out_buf = allocator.allocate(size_hint);
 
             if C::Codec::encode(Envelope::Response { id, payload: resp }, &mut out_buf).is_ok() {
                 let _ = sink.send(out_buf).await;

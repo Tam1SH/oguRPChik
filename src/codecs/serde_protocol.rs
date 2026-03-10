@@ -1,8 +1,8 @@
-use crate::align_buffer::AlignedBuffer;
-use crate::codecs::base::{Envelope, MessageCodec};
+use crate::codecs::base::{Envelope, HasAllocator, MessageCodec, OwnedBuf};
 use crate::codecs::serde_compatible::serde_format::SerdeFormat;
 use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
+use crate::pool::allocator::{SharedAllocator, TpcAllocator};
 
 #[derive(Serialize, Deserialize)]
 enum WireEnvelope<Req, Res> {
@@ -27,7 +27,7 @@ where
     type RequestView<'a> = Req;
     type ResponseView<'a> = Res;
 
-    type Dest = AlignedBuffer;
+    type Dest = VecBuf;
 
     fn decode(
         data: &[u8],
@@ -45,7 +45,7 @@ where
         msg: Envelope<Self::Request, Self::Response>,
         dest: &mut Self::Dest,
     ) -> anyhow::Result<()> {
-        dest.0.clear();
+        dest.clear();
 
         let wire = match msg {
             Envelope::Request { id, payload } => WireEnvelope::Request { id, payload },
@@ -59,4 +59,44 @@ where
     fn kind() -> &'static str {
         F::name()
     }
+}
+
+#[derive(Default, Clone, Debug, PartialEq)]
+pub struct VecBuf(pub Vec<u8>);
+
+impl AsRef<[u8]> for VecBuf {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl OwnedBuf for VecBuf {
+    fn with_capacity(capacity: usize) -> Self {
+        Self(Vec::with_capacity(capacity))
+    }
+
+    fn capacity(&self) -> usize {
+        self.0.capacity()
+    }
+
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn as_ptr(&self) -> *const u8 {
+        self.0.as_ptr()
+    }
+
+    fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.0.as_mut_ptr()
+    }
+
+    fn clear(&mut self) {
+        self.0.clear()
+    }
+}
+
+impl HasAllocator for VecBuf  {
+    type Alloc = TpcAllocator<VecBuf>;
+    type SharedAlloc = SharedAllocator<VecBuf>;
 }

@@ -3,7 +3,7 @@ use compio::net::{TcpListener, TcpStream};
 use socket2::SockAddr;
 use std::fmt::Display;
 use std::io;
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::SocketAddr;
 
 impl Acceptor for TcpListener {
     type Stream = TcpStream;
