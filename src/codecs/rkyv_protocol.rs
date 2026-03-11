@@ -1,14 +1,14 @@
-use compio::buf::{IoBuf, IoBufMut, SetLen};
-use std::mem::MaybeUninit;
+use crate::codecs::base::{Envelope, HasAllocator, MessageCodec, OwnedBuf, ReleasableBuf};
+use crate::pool::allocator::{SharedAllocator, TpcAllocator};
 use anyhow::Result;
+use compio::buf::{IoBuf, IoBufMut, SetLen};
 use rkyv::api::high::{HighSerializer, HighValidator, to_bytes_in};
 use rkyv::bytecheck::CheckBytes;
 use rkyv::rancor::Error;
 use rkyv::ser::allocator::ArenaHandle;
 use rkyv::util::AlignedVec;
 use rkyv::{Archive, Serialize, access};
-use crate::codecs::base::{Envelope, HasAllocator, MessageCodec, OwnedBuf};
-use crate::pool::allocator::{SharedAllocator, TpcAllocator};
+use std::mem::MaybeUninit;
 
 #[derive(Archive, Serialize)]
 pub(crate) enum RkyvEnvelope<Req, Res> {
@@ -69,7 +69,6 @@ where
     type Dest = AlignedBuffer;
 
     fn decode(data: &[u8]) -> Result<Envelope<Self::RequestView<'_>, Self::ResponseView<'_>>> {
-
         let archived = access::<ArchivedRkyvEnvelope<Req, Res>, Error>(data)?;
 
         match archived {
@@ -111,8 +110,6 @@ where
     }
 }
 
-
-
 #[derive(Default, Clone)]
 pub struct AlignedBuffer(pub AlignedVec);
 
@@ -138,14 +135,11 @@ impl AlignedBuffer {
     }
 }
 
-
-
 impl AsRef<[u8]> for AlignedBuffer {
     fn as_ref(&self) -> &[u8] {
         self.0.as_slice()
     }
 }
-
 
 impl OwnedBuf for AlignedBuffer {
     fn with_capacity(capacity: usize) -> Self {
@@ -169,6 +163,8 @@ impl OwnedBuf for AlignedBuffer {
         Self::clear(self);
     }
 }
+
+impl ReleasableBuf for AlignedBuffer {}
 
 impl HasAllocator for AlignedBuffer {
     type Alloc = TpcAllocator<AlignedBuffer>;

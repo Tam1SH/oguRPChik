@@ -1,8 +1,9 @@
 mod reactor;
 
+use crate::codecs::base::{BorrowedBuf, OwnedBuf, ReleasableBuf};
 use crate::transport::base::{
-    MessageSink, MessageSource, RawMessageSink, RawMessageSource,
-    TopologyRegistry, Transport, TransportAcceptor, TransportConnector, TransportPerWorkerBuilder,
+    MessageSink, MessageSource, RawMessageSink, RawMessageSource, TopologyRegistry, Transport,
+    TransportAcceptor, TransportConnector, TransportPerWorkerBuilder,
 };
 use crate::transport::impls::shm::reactor::GlobalReactor;
 use anyhow::Error;
@@ -26,9 +27,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use tracing::{debug, error, info, trace, warn};
-use crate::codecs::base::{BorrowedBuf, OwnedBuf};
- 
+
 pub struct IceoryxPayload(Sample<Service, [u8], ()>);
+impl ReleasableBuf for IceoryxPayload {}
 
 impl AsRef<[u8]> for IceoryxPayload {
     fn as_ref(&self) -> &[u8] {
@@ -58,25 +59,26 @@ fn port_event_factory(
         .max_notifiers(4)
         .max_listeners(4)
         .open_or_create()
-
         .map_err(|e| anyhow::anyhow!("Failed to open event service {}: {:?}", ev_name, e))
 }
 
 pub struct IceoryxConnector<B> {
     service_name: String,
-    phantom_data: PhantomData<B>
+    phantom_data: PhantomData<B>,
 }
 
 impl<B: OwnedBuf> IceoryxConnector<B> {
     pub fn new(service_name: &str) -> Self {
         Self {
             service_name: service_name.to_string(),
-            phantom_data: PhantomData
+            phantom_data: PhantomData,
         }
     }
 }
 
-impl<B: OwnedBuf> TransportConnector<IceoryxSinkAdapter<B>, IceoryxSourceAdapter> for IceoryxConnector<B> {
+impl<B: OwnedBuf> TransportConnector<IceoryxSinkAdapter<B>, IceoryxSourceAdapter>
+    for IceoryxConnector<B>
+{
     type Transport = IceoryxTransport;
 
     async fn connect(&self) -> anyhow::Result<Self::Transport> {
@@ -117,10 +119,12 @@ impl<B: OwnedBuf> TransportConnector<IceoryxSinkAdapter<B>, IceoryxSourceAdapter
 
 pub struct IceoryxAcceptor<B> {
     service_name: String,
-    phantom_data: PhantomData<B>
+    phantom_data: PhantomData<B>,
 }
 
-impl<B: OwnedBuf> TransportAcceptor<IceoryxSinkAdapter<B>, IceoryxSourceAdapter> for IceoryxAcceptor<B> {
+impl<B: OwnedBuf> TransportAcceptor<IceoryxSinkAdapter<B>, IceoryxSourceAdapter>
+    for IceoryxAcceptor<B>
+{
     type Transport = IceoryxTransport;
 
     async fn accept(&self) -> anyhow::Result<Self::Transport> {
@@ -173,7 +177,9 @@ impl<B: OwnedBuf> IceoryxBuilder<B> {
     }
 }
 
-impl<B: OwnedBuf> TransportPerWorkerBuilder<IceoryxSinkAdapter<B>, IceoryxSourceAdapter> for IceoryxBuilder<B> {
+impl<B: OwnedBuf> TransportPerWorkerBuilder<IceoryxSinkAdapter<B>, IceoryxSourceAdapter>
+    for IceoryxBuilder<B>
+{
     type Transport = IceoryxTransport;
     type Acceptor = IceoryxAcceptor<B>;
     async fn bind(
@@ -190,7 +196,10 @@ impl<B: OwnedBuf> TransportPerWorkerBuilder<IceoryxSinkAdapter<B>, IceoryxSource
             reg.register(core_id, service_name.clone());
         }
 
-        Ok(IceoryxAcceptor { service_name, phantom_data: PhantomData })
+        Ok(IceoryxAcceptor {
+            service_name,
+            phantom_data: PhantomData,
+        })
     }
 }
 
@@ -203,17 +212,13 @@ pub struct IceoryxSource {
 pub struct IceoryxRawSink<Tx> {
     pub publisher: Publisher<Service, [u8], ()>,
     pub notifier: Notifier<Service>,
-    pub phantom_data: PhantomData<Tx>
+    pub phantom_data: PhantomData<Tx>,
 }
 
 impl<Tx: OwnedBuf> RawMessageSink for IceoryxRawSink<Tx> {
     type Message = Tx;
 
-    fn poll_send(
-        &self,
-        _cx: &mut Context<'_>,
-        data: &mut Option<Tx>,
-    ) -> Poll<anyhow::Result<()>> {
+    fn poll_send(&self, _cx: &mut Context<'_>, data: &mut Option<Tx>) -> Poll<anyhow::Result<()>> {
         let msg = data.as_ref().expect("logic error: no data");
         let bytes = msg.as_ref();
 
@@ -230,7 +235,6 @@ impl<Tx: OwnedBuf> RawMessageSink for IceoryxRawSink<Tx> {
                 //      consider coalescing multiple sends into a single notify call
                 match self.notifier.notify() {
                     Ok(0) => {
-
                         warn!(id = ?self.publisher.id(), "no one listen");
                     }
                     Ok(_) => {}
@@ -292,7 +296,6 @@ impl RawMessageSource for IceoryxRawSource {
         Poll::Pending
     }
 }
-
 
 pub struct IceoryxSinkAdapter<Tx> {
     pub inner: Rc<IceoryxRawSink<Tx>>,
@@ -362,11 +365,11 @@ impl<Tx: OwnedBuf> Transport<IceoryxSinkAdapter<Tx>, IceoryxSourceAdapter> for I
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codecs::serde_protocol::VecBuf;
     use compio::time::sleep;
     use futures::future::join;
     use std::future::ready;
     use std::time::{Duration, Instant};
-    use crate::codecs::serde_protocol::VecBuf;
 
     fn create_payload(data: &[u8]) -> VecBuf {
         Vec::from(data).into()

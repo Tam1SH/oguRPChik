@@ -1,11 +1,11 @@
 use dashmap::DashMap;
 use iceoryx2::port::listener::Listener;
 use iceoryx2::prelude::*;
+use iceoryx2::service::ipc_threadsafe::Service;
 use iceoryx2::waitset::{WaitSet, WaitSetAttachmentId, WaitSetGuard};
 use std::sync::Arc;
 use std::task::Waker;
 use tracing::{debug, error, trace};
-use iceoryx2::service::ipc_threadsafe::Service;
 
 pub enum ReactorCmd {
     Attach(

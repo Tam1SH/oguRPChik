@@ -1,9 +1,12 @@
-use std::cell::Cell;
-use std::marker::PhantomData;
-use object_pool::Pool;
 use crate::codecs::base::OwnedBuf;
 use crate::pool::base::PoolStrategy;
+use crate::pool::pool_core::PoolCore;
+use crate::pool::pool_stats::PoolStats;
 use crate::transport::base::pool_config::PoolConfig;
+use object_pool::Pool;
+use std::cell::Cell;
+use std::marker::PhantomData;
+use std::sync::Arc;
 
 thread_local! {
     static TL_STATE: std::cell::RefCell<anymap::AnyMap> =
@@ -11,20 +14,27 @@ thread_local! {
 }
 
 pub struct TpcStrategy<B: OwnedBuf> {
-    threshold_factor: f32,
-    ema_alpha: f32,
     initial_cap: usize,
+    core: PoolCore,
     _marker: PhantomData<B>,
 }
 
 impl<B: OwnedBuf> TpcStrategy<B> {
-    pub fn new(initial_cap: usize, threshold_factor: f32, ema_alpha: f32) -> Self {
+    pub fn new(
+        initial_cap: usize,
+        threshold_factor: f32,
+        ema_alpha: f32,
+        hard_drop_bytes: usize,
+    ) -> Self {
         Self {
             initial_cap,
-            threshold_factor,
-            ema_alpha,
+            core: PoolCore::new(threshold_factor, ema_alpha, hard_drop_bytes),
             _marker: PhantomData,
         }
+    }
+
+    pub fn stats(&self) -> Arc<PoolStats> {
+        Arc::clone(&self.core.stats)
     }
 
     fn with_tl<R>(&self, f: impl FnOnce(&Pool<B>, &Cell<f32>) -> R) -> R {
@@ -36,9 +46,10 @@ impl<B: OwnedBuf> TpcStrategy<B> {
                 map.insert(Cell::new(self.initial_cap as f32));
             }
 
-            let pool = map.get::<Pool<B>>().unwrap();
-            let ema = map.get::<Cell<f32>>().unwrap();
-            f(pool, ema)
+            f(
+                map.get::<Pool<B>>().unwrap(),
+                map.get::<Cell<f32>>().unwrap(),
+            )
         })
     }
 }
@@ -46,52 +57,36 @@ impl<B: OwnedBuf> TpcStrategy<B> {
 impl<B: OwnedBuf> Clone for TpcStrategy<B> {
     fn clone(&self) -> Self {
         Self {
-            threshold_factor: self.threshold_factor,
-            ema_alpha: self.ema_alpha,
             initial_cap: self.initial_cap,
+            core: self.core.clone(),
             _marker: PhantomData,
         }
     }
 }
 
 impl<B: OwnedBuf> PoolStrategy<B> for TpcStrategy<B> {
-    type SendMark = *const ();
+    type SendMark = *const (); // !Send — backed by TLS
 
     fn get(config: &PoolConfig) -> Self {
         Self {
             initial_cap: config.initial_cap,
-            threshold_factor: config.threshold_factor,
-            ema_alpha: config.ema_alpha,
+            core: PoolCore::new(
+                config.threshold_factor,
+                config.ema_alpha,
+                config.hard_drop_bytes,
+            ),
             _marker: PhantomData,
         }
     }
 
-    fn acquire(&self, cap: usize) -> B {
-        self.with_tl(|pool, _ema| {
-            let mut buf = pool.pull(|| B::with_capacity(cap)).detach().1;
-            if buf.capacity() < cap {
-                buf = B::with_capacity(cap);
-            }
-            buf.clear();
-            buf
-        })
+    fn acquire(&self, size_hint: usize) -> B {
+        self.with_tl(|pool, ema| self.core.do_acquire(size_hint, ema.get(), pool))
     }
 
-    fn release(&self, mut buf: B) {
-        let cap = buf.capacity();
-        let alpha = self.ema_alpha;
-        let threshold = self.threshold_factor;
-
-        self.with_tl(|pool, ema_cell| {
-            let new_ema = ema_cell.get() * (1.0 - alpha) + cap as f32 * alpha;
-            ema_cell.set(new_ema);
-
-            if cap > (new_ema * threshold) as usize && cap > 131072 {
-                return;
-            }
-
-            buf.clear();
-            pool.attach(buf);
+    fn release(&self, buf: B) {
+        self.with_tl(|pool, ema| {
+            let new_ema = self.core.do_release(buf, ema.get(), pool);
+            ema.set(new_ema);
         });
     }
 }

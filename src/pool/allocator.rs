@@ -1,33 +1,51 @@
-use crate::codecs::base::{BufferAllocator, OwnedBuf};
+use crate::codecs::base::{BufferAllocator, OwnedBuf, ReleasableBuf};
 use crate::pool::base::PoolStrategy;
+use crate::pool::buf_guard::BufGuard;
 use crate::pool::pool_local::TpcStrategy;
 use crate::pool::pool_shared::SharedStrategy;
+use crate::pool::pool_stats::{PoolStats, PoolStatsSnapshot};
 use crate::transport::base::pool_config::PoolConfig;
+use std::sync::Arc;
 
-#[derive(Clone)]
-pub struct TpcAllocator<B: OwnedBuf>(TpcStrategy<B>);
+macro_rules! impl_allocator {
+    ($name:ident, $strategy:ident, $send_mark:ty) => {
+        #[derive(Clone)]
+        pub struct $name<B: OwnedBuf>($strategy<B>);
 
-impl<B: OwnedBuf> BufferAllocator for TpcAllocator<B> {
-    type Payload = B;
-    type SendMark = *const (); // !Send
+        impl<B: OwnedBuf + ReleasableBuf> BufferAllocator for $name<B> {
+            type Payload = B;
+            type SendMark = $send_mark;
 
-    fn get(config: &PoolConfig) -> Self {
-        Self(TpcStrategy::get(config))
-    }
-    fn allocate(&self, cap: usize) -> B { self.0.acquire(cap) }
-    fn release(&self, buf: B) { self.0.release(buf) }
+            fn get(config: &PoolConfig) -> Self {
+                Self($strategy::get(config))
+            }
+
+            fn allocate(&self, size_hint: usize) -> Self::Payload {
+                self.0.acquire(size_hint)
+            }
+
+            fn allocate_hinted(&self) -> Self::Payload {
+                self.allocate(0)
+            }
+
+            fn release(&self, buf: Self::Payload) {
+                self.0.release(buf);
+            }
+
+            fn stats(&self) -> Arc<PoolStats> {
+                self.0.stats()
+            }
+        }
+    };
 }
 
-#[derive(Clone)]
-pub struct SharedAllocator<B: OwnedBuf>(SharedStrategy<B>);
+impl_allocator!(TpcAllocator, TpcStrategy, *const ());
+impl_allocator!(SharedAllocator, SharedStrategy, ());
 
-impl<B: OwnedBuf> BufferAllocator for SharedAllocator<B> {
-    type Payload = B;
-    type SendMark = (); // Send
-
-    fn get(config: &PoolConfig) -> Self {
-        Self(SharedStrategy::get(config))
+pub trait AllocatorExt: BufferAllocator {
+    fn stats_snapshot(&self) -> PoolStatsSnapshot {
+        self.stats().snapshot()
     }
-    fn allocate(&self, cap: usize) -> B { self.0.acquire(cap) }
-    fn release(&self, buf: B) { self.0.release(buf) }
 }
+
+impl<A: BufferAllocator> AllocatorExt for A {}

@@ -68,7 +68,6 @@ mod tests {
 
     #[compio::test]
     async fn test_rpc_tcp() -> anyhow::Result<()> {
-
         let transport = TcpTransport::new("127.0.0.1".to_string());
 
         let res = rpc_call!(transport, RkyvCodec<Request, Response>, EchoHandler, Request::Ping);

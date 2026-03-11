@@ -1,8 +1,10 @@
-use crate::low::runtime;
+use crate::codecs::base::BufferAllocator;
 use crate::high::service_handler::ServiceHandler;
+use crate::low::main_loop::{SessionConfig, run_session};
+use crate::low::runtime;
 use crate::transport::base::{
     MessageSink, MessageSource, TopologyRegistry, Transport, TransportAcceptor,
-    TransportPerWorkerBuilder
+    TransportPerWorkerBuilder,
 };
 use anyhow::Result;
 use dashmap::DashMap;
@@ -11,27 +13,24 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{error, info};
-use crate::low::main_loop::{run_session, SessionConfig};
 
 pub struct ServerWorker<C: SessionConfig, H: ServiceHandler<C::Codec>> {
     phantom: PhantomData<(C, H)>,
 }
 
-impl<C: SessionConfig, H: ServiceHandler<C::Codec>>
-    ServerWorker<C, H>
-{
+impl<C: SessionConfig, H: ServiceHandler<C::Codec>> ServerWorker<C, H> {
     pub fn spawn<B, Sink, Source>(
         core_id: usize,
         builder: B,
         handler: H,
         registry: Option<Arc<dyn TopologyRegistry>>,
-        allocator: C::Alloc
+        tx_allocator: C::TxAlloc,
     ) -> Result<()>
     where
         B: TransportPerWorkerBuilder<Sink, Source>,
-        Sink: MessageSink<Payload = C::OutPayload>,
+        Sink: MessageSink<Payload = <C::TxAlloc as BufferAllocator>::Payload>,
         Source: MessageSource<Payload = C::RxPayload>,
-        <C as SessionConfig>::Alloc: Send
+        C::TxAlloc: Send,
     {
         runtime::spawn_on(core_id, move || async move {
             let acceptor = match builder.bind(core_id, registry.as_ref()).await {
@@ -43,17 +42,18 @@ impl<C: SessionConfig, H: ServiceHandler<C::Codec>>
             };
 
             info!(core_id, "Server worker listening");
+
             loop {
-                let allocator = allocator.clone();
+                let alloc = tx_allocator.clone();
                 match acceptor.accept().await {
                     Ok(transport) => {
-                        info!("accepted new connection");
+                        info!("Accepted new connection");
                         let h = handler.clone();
 
                         let (sink, source) = match transport.decompose() {
-                            Ok(transport) => transport,
+                            Ok(pair) => pair,
                             Err(e) => {
-                                error!(core_id, error = %e, "Transport error");
+                                error!(core_id, error = %e, "Transport decompose error");
                                 compio::time::sleep(Duration::from_millis(1000)).await;
                                 continue;
                             }
@@ -61,10 +61,8 @@ impl<C: SessionConfig, H: ServiceHandler<C::Codec>>
 
                         compio::runtime::spawn(async move {
                             info!("run_session task started");
-
                             let pending = Rc::new(DashMap::new());
-
-                            run_session::<C, _, _, _>(h, sink, source, pending, allocator).await;
+                            run_session::<C, _, _, _>(h, sink, source, pending, alloc).await;
                         })
                         .detach();
                     }

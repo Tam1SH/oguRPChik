@@ -4,14 +4,16 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::info;
 
-use crate::codecs::base::{BorrowedBuf, BufferAllocator, HasAllocator, MessageCodec, OwnedBuf};
+use crate::codecs::base::{
+    BorrowedBuf, BufferAllocator, HasAllocator, MessageCodec, OwnedBuf, ReleasableBuf,
+};
+use crate::high::service_handler::ServiceHandler;
 use crate::low::runtime;
 use crate::low::server_worker::ServerWorker;
-use crate::high::service_handler::ServiceHandler;
+use crate::transport::base::pool_config::PoolConfig;
 use crate::transport::base::{
     MessageSink, MessageSource, TopologyRegistry, TransportBuilder, TransportPerWorkerBuilder,
 };
-use crate::transport::base::pool_config::PoolConfig;
 
 pub struct NoHandler;
 pub struct NoCodec;
@@ -95,14 +97,14 @@ impl<H, C, T, Si, So, RxPayload> ServerBuilder<H, C, T, Si, So, RxPayload> {
 impl<H, C, T, Si, So, RxPayload> ServerBuilder<H, C, T, Si, So, RxPayload>
 where
     C: MessageCodec,
-    C::Dest: HasAllocator + OwnedBuf,
-    H: ServiceHandler<C> + Clone + Send + 'static,
-    Si: MessageSink<Payload = C::Dest> + 'static,
-    So: MessageSource<Payload = RxPayload> + 'static,
+    C::Dest: HasAllocator,
+    <C::Dest as HasAllocator>::Alloc: BufferAllocator<Payload = C::Dest>,
+    H: ServiceHandler<C>,
+    Si: MessageSink<Payload = C::Dest>,
+    So: MessageSource<Payload = RxPayload>,
     T: TransportBuilder<C::Dest, Rx = RxPayload>,
-    RxPayload: BorrowedBuf,
+    RxPayload: ReleasableBuf,
     <T as TransportBuilder<C::Dest>>::Builder: TransportPerWorkerBuilder<Si, So>,
-    <C::Dest as HasAllocator>::Alloc: BufferAllocator<Payload = C::Dest> + Send + 'static,
 {
     pub async fn run(self) -> anyhow::Result<std::convert::Infallible> {
         let transport = self.transport.ok_or_else(|| anyhow!("Transport not set"))?;
@@ -139,7 +141,7 @@ where
                 Some(registry.clone()),
                 allocator,
             )
-                .with_context(|| format!("Failed to spawn worker on core {}", core_id))?;
+            .with_context(|| format!("Failed to spawn worker on core {}", core_id))?;
         }
 
         loop {

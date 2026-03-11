@@ -1,10 +1,12 @@
-use crate::high::client::Client;
-use crate::low::client_per_core::ClientConfig;
-use crate::codecs::base::{BorrowedBuf, HasAllocator, MessageCodec, OwnedBuf};
+use crate::codecs::base::{
+    BorrowedBuf, BufferAllocator, HasAllocator, MessageCodec, OwnedBuf, ReleasableBuf,
+};
 use crate::discovery::kv::{KvStore, default_kv};
 use crate::discovery::{RpcTopologyRegistry, ServiceRegistration, Topology};
+use crate::high::client::Client;
 use crate::high::server::setup;
 use crate::high::service_handler::ServiceHandler;
+use crate::low::client_per_core::ClientConfig;
 use crate::transport::base::TransportBuilder;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -96,6 +98,7 @@ pub struct Node<S, C> {
 
 pub struct NoServe;
 pub struct NoConnect;
+pub struct NoPayload;
 
 pub struct ServeConfig<H, T, Codec> {
     transport: T,
@@ -103,7 +106,6 @@ pub struct ServeConfig<H, T, Codec> {
     publish_as: Option<String>,
     _codec: PhantomData<Codec>,
 }
-
 pub struct ConnectConfig<T, Codec> {
     transport: T,
     wait_for: Option<String>,
@@ -140,11 +142,7 @@ impl<S, C> Node<S, C> {
 }
 
 impl<C> Node<NoServe, C> {
-    pub fn serve<Codec, H, T>(
-        self,
-        transport: T,
-        handler: H,
-    ) -> Node<ServeConfig<H, T, Codec>, C>
+    pub fn serve<Codec, H, T>(self, transport: T, handler: H) -> Node<ServeConfig<H, T, Codec>, C>
     where
         Codec: MessageCodec,
         T: TransportBuilder<Codec::Dest>,
@@ -165,11 +163,7 @@ impl<C> Node<NoServe, C> {
 }
 
 impl<S> Node<S, NoConnect> {
-    // RxPayload убран — выводится из T::Rx везде где нужен
-    pub fn connect<Codec, T>(
-        self,
-        transport: T,
-    ) -> Node<S, ConnectConfig<T, Codec>>
+    pub fn connect<Codec, T>(self, transport: T) -> Node<S, ConnectConfig<T, Codec>>
     where
         Codec: MessageCodec,
         T: TransportBuilder<Codec::Dest>,
@@ -179,8 +173,8 @@ impl<S> Node<S, NoConnect> {
             connect: ConnectConfig {
                 transport,
                 wait_for: None,
-                _codec: PhantomData,
                 config: None,
+                _codec: PhantomData,
             },
             kv: self.kv,
             threads: self.threads,
@@ -189,72 +183,71 @@ impl<S> Node<S, NoConnect> {
 }
 
 impl<H, T, Codec, C> Node<ServeConfig<H, T, Codec>, C> {
-    pub fn publish(mut self, service_name: impl Into<String>) -> Self {
-        self.serve.publish_as = Some(service_name.into());
+    pub fn publish(mut self, name: impl Into<String>) -> Self {
+        self.serve.publish_as = Some(name.into());
         self
     }
 }
 
 impl<S, T, Codec> Node<S, ConnectConfig<T, Codec>> {
-    pub fn wait_for(mut self, service_name: impl Into<String>) -> Self {
-        self.connect.wait_for = Some(service_name.into());
+    pub fn wait_for(mut self, name: impl Into<String>) -> Self {
+        self.connect.wait_for = Some(name.into());
         self
     }
 
-    pub fn timeout(mut self, timeout_in_seconds: u64) -> Self {
+    pub fn timeout(mut self, secs: u64) -> Self {
         let mut cfg = self.connect.config.unwrap_or_default();
-        cfg.timeout_seconds = timeout_in_seconds;
+        cfg.timeout_seconds = secs;
         self.connect.config = Some(cfg);
         self
     }
 }
 
-// ── serve + connect ───────────────────────────────────────────────────────────
-
-impl<H, ST, SC, SCodec, CCodec, P>
-Node<ServeConfig<H, ST, SCodec>, ConnectConfig<SC, CCodec>>
+impl<H, ST, SC, SCodec, CCodec> Node<ServeConfig<H, ST, SCodec>, ConnectConfig<SC, CCodec>>
 where
-    SCodec: MessageCodec<Dest = P>,
-    CCodec: MessageCodec<Dest = P>,
-    ST: TransportBuilder<P> + Clone + Send + Sync + 'static,
-    SC: TransportBuilder<P> + Send + Sync + 'static,
-    H: ServiceHandler<SCodec> + Clone,
-    P: OwnedBuf + HasAllocator,
-    ST::Rx: BorrowedBuf,
-    SC::Rx: BorrowedBuf,
-    <P as HasAllocator>::SharedAlloc: Send,
+    SCodec: MessageCodec,
+    CCodec: MessageCodec<Dest = SCodec::Dest>,
+    SCodec::Dest: OwnedBuf + HasAllocator,
+    ST: TransportBuilder<SCodec::Dest>,
+    SC: TransportBuilder<SCodec::Dest>,
+    ST::Rx: ReleasableBuf,
+    SC::Rx: ReleasableBuf,
+    H: ServiceHandler<SCodec>,
 {
     #[instrument(skip(self), fields(
         serve_transport = %self.serve.transport.kind(),
-        serve_codec = %SCodec::kind(),
-        connect_codec = %CCodec::kind(),
-        publish_as = ?self.serve.publish_as,
-        wait_for = ?self.connect.wait_for,
+        serve_codec     = %SCodec::kind(),
+        connect_codec   = %CCodec::kind(),
+        publish_as      = ?self.serve.publish_as,
+        wait_for        = ?self.connect.wait_for,
     ))]
     pub async fn start(
         self,
-    ) -> anyhow::Result<(Client<CCodec, P, SC::Rx>, Option<ServiceRegistration>)> {
+    ) -> anyhow::Result<(
+        Client<CCodec, CCodec::Dest, SC::Rx>,
+        Option<ServiceRegistration>,
+    )> {
         info!("Node starting");
 
-        let (local_topology, guard) = start_server::<_, _, SCodec>(
+        let (local_topology, guard) = start_server::<H, ST, SCodec, CCodec::Dest>(
             self.serve.transport,
             self.serve.handler,
             self.serve.publish_as,
             self.kv.clone(),
             self.threads,
         )
-            .await?;
+        .await?;
 
         let topology =
             resolve_remote(self.connect.wait_for.as_deref(), local_topology, &self.kv).await?;
 
         info!("Connecting client");
-        let client = Client::<CCodec, P, SC::Rx>::connect(
+        let client = Client::<CCodec, CCodec::Dest, SC::Rx>::connect(
             self.connect.config.unwrap_or_default(),
             self.connect.transport,
             topology,
         )
-            .await?;
+        .await?;
 
         info!("Node fully started");
         Ok((client, guard))
@@ -266,46 +259,45 @@ where
 impl<H, T, Codec> Node<ServeConfig<H, T, Codec>, NoConnect>
 where
     Codec: MessageCodec,
-    T: TransportBuilder<Codec::Dest> + Clone + Send + Sync + 'static,
-    T::Rx: BorrowedBuf,
-    H: ServiceHandler<Codec> + Clone,
-    Codec::Dest: HasAllocator,
+    Codec::Dest: OwnedBuf + HasAllocator,
+    T: TransportBuilder<Codec::Dest>,
+    T::Rx: ReleasableBuf,
+    H: ServiceHandler<Codec>,
 {
     #[instrument(skip(self), fields(
-        transport = %self.serve.transport.kind(),
-        codec = %Codec::kind(),
+        transport  = %self.serve.transport.kind(),
+        codec      = %Codec::kind(),
         publish_as = ?self.serve.publish_as,
     ))]
     pub async fn start(self) -> anyhow::Result<Option<ServiceRegistration>> {
         info!("Node starting (serve only)");
-        let (_, guard) = start_server::<_, _, Codec>(
+        let (_, guard) = start_server::<H, T, Codec, Codec::Dest>(
             self.serve.transport,
             self.serve.handler,
             self.serve.publish_as,
             self.kv,
             self.threads,
         )
-            .await?;
+        .await?;
         Ok(guard)
     }
 }
 
 // ── connect only ──────────────────────────────────────────────────────────────
 
-impl<T, Codec, P> Node<NoServe, ConnectConfig<T, Codec>>
+impl<T, Codec> Node<NoServe, ConnectConfig<T, Codec>>
 where
-    Codec: MessageCodec<Dest = P>,
-    T: TransportBuilder<P> + Clone,
-    T::Rx: BorrowedBuf,
-    P: OwnedBuf + HasAllocator + 'static,
-    <P as HasAllocator>::SharedAlloc: Send,
+    Codec: MessageCodec,
+    Codec::Dest: OwnedBuf + HasAllocator,
+    T: TransportBuilder<Codec::Dest>,
+    T::Rx: ReleasableBuf,
 {
     #[instrument(skip(self), fields(
         transport = %self.connect.transport.kind(),
-        codec = %Codec::kind(),
-        wait_for = ?self.connect.wait_for,
+        codec     = %Codec::kind(),
+        wait_for  = ?self.connect.wait_for,
     ))]
-    pub async fn start(self) -> anyhow::Result<Client<Codec, P, T::Rx>> {
+    pub async fn start(self) -> anyhow::Result<Client<Codec, Codec::Dest, T::Rx>> {
         info!("Node starting (connect only)");
 
         let topology = resolve_remote(
@@ -313,14 +305,14 @@ where
             Topology::default(),
             &self.kv,
         )
-            .await?;
+        .await?;
 
-        let client = Client::<Codec, P, T::Rx>::connect(
+        let client = Client::<Codec, Codec::Dest, T::Rx>::connect(
             self.connect.config.unwrap_or_default(),
             self.connect.transport,
             topology,
         )
-            .await?;
+        .await?;
 
         info!("Node connected");
         Ok(client)
@@ -329,7 +321,9 @@ where
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-async fn start_server<H, T, Codec>(
+type TxAlloc<P> = <P as HasAllocator>::Alloc;
+
+async fn start_server<H, T, Codec, P>(
     transport: T,
     handler: H,
     publish_as: Option<String>,
@@ -337,11 +331,11 @@ async fn start_server<H, T, Codec>(
     num_threads: usize,
 ) -> anyhow::Result<(Topology, Option<ServiceRegistration>)>
 where
-    Codec: MessageCodec,
-    Codec::Dest: HasAllocator,
-    T: TransportBuilder<Codec::Dest> + Clone + Send + Sync + 'static,
-    T::Rx: BorrowedBuf,
-    H: ServiceHandler<Codec> + Clone,
+    P: OwnedBuf + HasAllocator,
+    Codec: MessageCodec<Dest = <TxAlloc<P> as BufferAllocator>::Payload>,
+    T: TransportBuilder<P>,
+    T::Rx: ReleasableBuf,
+    H: ServiceHandler<Codec>,
 {
     let registry = RpcTopologyRegistry::builder(transport.kind(), Codec::kind())
         .publish_as(publish_as.unwrap_or_default())
@@ -359,7 +353,7 @@ where
             .await
             .expect("Server error");
     })
-        .detach();
+    .detach();
 
     info!("Waiting for server to become ready");
     let result = registry.ready().await;

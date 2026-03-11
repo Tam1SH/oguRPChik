@@ -1,10 +1,10 @@
 pub mod pool_config;
 
+use crate::codecs::base::{BorrowedBuf, OwnedBuf};
+use crate::transport::base::pool_config::PoolConfig;
 use std::io;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use crate::codecs::base::{OwnedBuf, BorrowedBuf};
-use crate::transport::base::pool_config::PoolConfig;
 
 pub trait RawMessageSink: 'static {
     type Message;
@@ -40,8 +40,6 @@ pub trait TransportConnector<Sink: MessageSink, Source: MessageSource>: Send + '
     type Transport: Transport<Sink, Source>;
 
     async fn connect(&self) -> anyhow::Result<Self::Transport>;
-
-
 }
 
 pub trait TransportAcceptor<Sink: MessageSink, Source: MessageSource>: 'static {
@@ -63,7 +61,7 @@ pub trait TopologyRegistry: Send + Sync + 'static {
     fn codec_name(&self) -> &str;
 }
 
-pub trait TransportBuilder<Tx: OwnedBuf>: 'static {
+pub trait TransportBuilder<Tx: OwnedBuf>: Clone + 'static {
     type Rx: BorrowedBuf;
     type Si: MessageSink<Payload = Tx> + 'static;
     type So: MessageSource<Payload = Self::Rx> + 'static;
@@ -74,7 +72,8 @@ pub trait TransportBuilder<Tx: OwnedBuf>: 'static {
 
     fn server_builder(&self, core_id: usize) -> Self::Builder;
 
-    fn client_connector(&self, endpoint: String, core_id: usize) -> anyhow::Result<Self::Connector>;
+    fn client_connector(&self, endpoint: String, core_id: usize)
+    -> anyhow::Result<Self::Connector>;
 }
 
 pub trait TransportPerWorkerBuilder<Sink: MessageSink, Source: MessageSource>:
@@ -89,6 +88,3 @@ pub trait TransportPerWorkerBuilder<Sink: MessageSink, Source: MessageSource>:
         registry: Option<&Arc<dyn TopologyRegistry>>,
     ) -> io::Result<Self::Acceptor>;
 }
-
-
-

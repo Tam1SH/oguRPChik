@@ -1,4 +1,5 @@
-use crate::codecs::base::{BufferAllocator, OwnedBuf};
+use crate::codecs::base::BufferAllocator;
+use crate::pool::buf_guard::BufGuard;
 use crate::transport::base::{
     TopologyRegistry, Transport, TransportAcceptor, TransportConnector, TransportPerWorkerBuilder,
 };
@@ -10,67 +11,139 @@ use std::io;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-pub struct StreamTransport<S: AsyncStream, B: StreamBuf, A: BufferAllocator<Payload = B>> {
+pub struct StreamTransport<S, B, TxA, RxA>
+where
+    S: AsyncStream,
+    B: StreamBuf,
+    TxA: BufferAllocator<Payload = B>,
+    RxA: BufferAllocator<Payload = B, SendMark = ()>,
+{
     stream: S,
     config: PeerConfig,
-    allocator: A,
-}
-
-impl<S: AsyncStream, B: StreamBuf, A: BufferAllocator<Payload = B>> StreamTransport<S, B, A> {
-    pub fn new(stream: S, config: PeerConfig, allocator: A) -> Self {
-        Self { stream, config, allocator }
-    }
-}
-
-impl<S: AsyncStream, B: StreamBuf, A: BufferAllocator<Payload = B>>
-Transport<PeerSink<B>, PeerSource<B>> for StreamTransport<S, B, A>
-{
-    fn decompose(self) -> anyhow::Result<(PeerSink<B>, PeerSource<B>)> {
-        Peer::new(self.stream, self.config, self.allocator).map_err(Into::into)
-    }
-}
-
-// ── Acceptor ──────────────────────────────────────────────────────────────────
-
-pub struct GenericStreamAcceptor<A: Acceptor, B: StreamBuf, Alloc: BufferAllocator<Payload = B>> {
-    inner: A,
-    config: PeerConfig,
-    allocator: Alloc,
-}
-
-impl<A: Acceptor, B: StreamBuf, Alloc: BufferAllocator<Payload = B>>
-TransportAcceptor<PeerSink<B>, PeerSource<B>> for GenericStreamAcceptor<A, B, Alloc>
-{
-    type Transport = StreamTransport<A::Stream, B, Alloc>;
-
-    async fn accept(&self) -> anyhow::Result<Self::Transport> {
-        let (stream, _) = self.inner.accept().await?;
-        Ok(StreamTransport::new(stream, self.config.clone(), self.allocator.clone()))
-    }
-}
-
-// ── Builder ───────────────────────────────────────────────────────────────────
-
-pub struct GenericStreamBuilder<AB: AcceptorBuilder, B: StreamBuf, Alloc: BufferAllocator<Payload = B>> {
-    inner_builder: AB,
-    config: PeerConfig,
-    allocator: Alloc,
+    tx_allocator: TxA,
+    rx_allocator: RxA,
     _marker: PhantomData<B>,
 }
 
-impl<AB: AcceptorBuilder, B: StreamBuf, Alloc: BufferAllocator<Payload = B>>
-GenericStreamBuilder<AB, B, Alloc>
+impl<S, B, TxA, RxA> StreamTransport<S, B, TxA, RxA>
+where
+    S: AsyncStream,
+    B: StreamBuf,
+    TxA: BufferAllocator<Payload = B>,
+    RxA: BufferAllocator<Payload = B, SendMark = ()>,
 {
-    pub fn new(inner_builder: AB, config: PeerConfig, allocator: Alloc) -> Self {
-        Self { inner_builder, config, allocator, _marker: PhantomData }
+    pub fn new(stream: S, config: PeerConfig, tx_allocator: TxA, rx_allocator: RxA) -> Self {
+        Self {
+            stream,
+            config,
+            tx_allocator,
+            rx_allocator,
+            _marker: PhantomData,
+        }
     }
 }
 
-impl<AB: AcceptorBuilder, B: StreamBuf, Alloc: BufferAllocator<Payload = B> + Send>
-TransportPerWorkerBuilder<PeerSink<B>, PeerSource<B>> for GenericStreamBuilder<AB, B, Alloc>
+impl<S, B, TxA, RxA> Transport<PeerSink<B>, PeerSource<BufGuard<B, RxA>>>
+    for StreamTransport<S, B, TxA, RxA>
+where
+    S: AsyncStream + Clone + 'static,
+    B: StreamBuf,
+    TxA: BufferAllocator<Payload = B>,
+    RxA: BufferAllocator<Payload = B, SendMark = ()>,
 {
-    type Transport = StreamTransport<AB::Stream, B, Alloc>;
-    type Acceptor = GenericStreamAcceptor<AB::Acceptor, B, Alloc>;
+    fn decompose(self) -> anyhow::Result<(PeerSink<B>, PeerSource<BufGuard<B, RxA>>)> {
+        Peer::new(
+            self.stream,
+            self.config,
+            self.tx_allocator,
+            self.rx_allocator,
+        )
+        .map_err(Into::into)
+    }
+}
+
+pub struct GenericStreamAcceptor<A, B, TxA, RxA>
+where
+    A: Acceptor,
+    B: StreamBuf,
+    TxA: BufferAllocator<Payload = B>,
+    RxA: BufferAllocator<Payload = B, SendMark = ()>,
+{
+    inner: A,
+    config: PeerConfig,
+    tx_allocator: TxA,
+    rx_allocator: RxA,
+    _marker: PhantomData<B>,
+}
+
+impl<A, B, TxA, RxA> TransportAcceptor<PeerSink<B>, PeerSource<BufGuard<B, RxA>>>
+    for GenericStreamAcceptor<A, B, TxA, RxA>
+where
+    A: Acceptor,
+    B: StreamBuf,
+    TxA: BufferAllocator<Payload = B>,
+    RxA: BufferAllocator<Payload = B, SendMark = ()>,
+{
+    type Transport = StreamTransport<A::Stream, B, TxA, RxA>;
+
+    async fn accept(&self) -> anyhow::Result<Self::Transport> {
+        let (stream, _) = self.inner.accept().await?;
+        Ok(StreamTransport::new(
+            stream,
+            self.config.clone(),
+            self.tx_allocator.clone(),
+            self.rx_allocator.clone(),
+        ))
+    }
+}
+
+pub struct GenericStreamBuilder<AB, B, TxA, RxA>
+where
+    AB: AcceptorBuilder,
+    B: StreamBuf,
+    TxA: BufferAllocator<Payload = B>,
+    RxA: BufferAllocator<Payload = B, SendMark = ()>,
+{
+    inner_builder: AB,
+    config: PeerConfig,
+    tx_allocator: TxA,
+    rx_allocator: RxA,
+    _marker: PhantomData<B>,
+}
+
+impl<AB, B, TxA, RxA> GenericStreamBuilder<AB, B, TxA, RxA>
+where
+    AB: AcceptorBuilder,
+    B: StreamBuf,
+    TxA: BufferAllocator<Payload = B>,
+    RxA: BufferAllocator<Payload = B, SendMark = ()>,
+{
+    pub fn new(
+        inner_builder: AB,
+        config: PeerConfig,
+        tx_allocator: TxA,
+        rx_allocator: RxA,
+    ) -> Self {
+        Self {
+            inner_builder,
+            config,
+            tx_allocator,
+            rx_allocator,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<AB, B, TxA, RxA> TransportPerWorkerBuilder<PeerSink<B>, PeerSource<BufGuard<B, RxA>>>
+    for GenericStreamBuilder<AB, B, TxA, RxA>
+where
+    AB: AcceptorBuilder,
+    B: StreamBuf,
+    TxA: BufferAllocator<Payload = B> + Send,
+    RxA: BufferAllocator<Payload = B, SendMark = ()> + Send,
+{
+    type Transport = StreamTransport<AB::Stream, B, TxA, RxA>;
+    type Acceptor = GenericStreamAcceptor<AB::Acceptor, B, TxA, RxA>;
 
     async fn bind(
         self,
@@ -85,35 +158,62 @@ TransportPerWorkerBuilder<PeerSink<B>, PeerSource<B>> for GenericStreamBuilder<A
         Ok(GenericStreamAcceptor {
             inner: acceptor,
             config: self.config,
-            allocator: self.allocator,
+            tx_allocator: self.tx_allocator,
+            rx_allocator: self.rx_allocator,
+            _marker: PhantomData,
         })
     }
 }
 
-// ── Connector ─────────────────────────────────────────────────────────────────
-
-pub struct GenericStreamConnector<C: Connector, B: StreamBuf, Alloc: BufferAllocator<Payload = B>> {
+pub struct GenericStreamConnector<C, B, TxA, RxA>
+where
+    C: Connector,
+    B: StreamBuf,
+    TxA: BufferAllocator<Payload = B>,
+    RxA: BufferAllocator<Payload = B, SendMark = ()>,
+{
     inner: C,
     config: PeerConfig,
-    allocator: Alloc,
+    tx_allocator: TxA,
+    rx_allocator: RxA,
     _marker: PhantomData<B>,
 }
 
-impl<C: Connector, B: StreamBuf, Alloc: BufferAllocator<Payload = B>>
-GenericStreamConnector<C, B, Alloc>
+impl<C, B, TxA, RxA> GenericStreamConnector<C, B, TxA, RxA>
+where
+    C: Connector,
+    B: StreamBuf,
+    TxA: BufferAllocator<Payload = B>,
+    RxA: BufferAllocator<Payload = B, SendMark = ()>,
 {
-    pub fn new(inner: C, config: PeerConfig, allocator: Alloc) -> Self {
-        Self { inner, config, allocator, _marker: PhantomData }
+    pub fn new(inner: C, config: PeerConfig, tx_allocator: TxA, rx_allocator: RxA) -> Self {
+        Self {
+            inner,
+            config,
+            tx_allocator,
+            rx_allocator,
+            _marker: PhantomData,
+        }
     }
 }
 
-impl<C: Connector, B: StreamBuf, Alloc: BufferAllocator<Payload = B> + Send>
-TransportConnector<PeerSink<B>, PeerSource<B>> for GenericStreamConnector<C, B, Alloc>
+impl<C, B, TxA, RxA> TransportConnector<PeerSink<B>, PeerSource<BufGuard<B, RxA>>>
+    for GenericStreamConnector<C, B, TxA, RxA>
+where
+    C: Connector,
+    B: StreamBuf,
+    TxA: BufferAllocator<Payload = B> + Send,
+    RxA: BufferAllocator<Payload = B, SendMark = ()> + Send,
 {
-    type Transport = StreamTransport<C::Stream, B, Alloc>;
+    type Transport = StreamTransport<C::Stream, B, TxA, RxA>;
 
     async fn connect(&self) -> anyhow::Result<Self::Transport> {
         let stream = self.inner.connect().await?;
-        Ok(StreamTransport::new(stream, self.config.clone(), self.allocator.clone()))
+        Ok(StreamTransport::new(
+            stream,
+            self.config.clone(),
+            self.tx_allocator.clone(),
+            self.rx_allocator.clone(),
+        ))
     }
 }

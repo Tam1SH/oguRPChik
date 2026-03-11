@@ -1,6 +1,6 @@
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
 use bytes::BufMut;
+use serde::{Deserialize, Serialize};
 
 pub trait SerdeFormat: Send + Sync + 'static {
     fn name() -> &'static str;

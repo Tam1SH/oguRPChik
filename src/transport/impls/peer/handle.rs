@@ -1,7 +1,7 @@
+use crate::codecs::base::{BorrowedBuf, OwnedBuf};
 use crate::transport::base::{MessageSink, MessageSource};
 use local_sync::mpsc::bounded::{Rx, Tx};
 use smallvec::SmallVec;
-use crate::codecs::base::{BorrowedBuf, OwnedBuf};
 
 pub type MsgBatch<B> = SmallVec<[B; 8]>;
 

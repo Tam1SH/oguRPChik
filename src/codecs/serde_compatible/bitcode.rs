@@ -1,8 +1,8 @@
-use std::io::Write;
-use bytes::BufMut;
 use crate::codecs::serde_compatible::serde_format::SerdeFormat;
 use crate::codecs::serde_protocol::SerdeProtocol;
+use bytes::BufMut;
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 
 pub type BitcodeCodec<Req, Res> = SerdeProtocol<Req, Res, Bitcode>;
 
@@ -13,10 +13,7 @@ impl SerdeFormat for Bitcode {
         "bitcode"
     }
 
-    fn serialize<T: Serialize, B: BufMut>(
-        value: &T,
-        dest: &mut B,
-    ) -> anyhow::Result<()> {
+    fn serialize<T: Serialize, B: BufMut>(value: &T, dest: &mut B) -> anyhow::Result<()> {
         let bytes = bitcode::serialize(value).map_err(|e| anyhow::anyhow!(e))?;
         let mut writer = dest.writer();
         writer.write(&bytes)?;

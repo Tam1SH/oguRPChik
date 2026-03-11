@@ -1,8 +1,8 @@
-use crate::codecs::base::{Envelope, HasAllocator, MessageCodec, OwnedBuf};
+use crate::codecs::base::{Envelope, HasAllocator, MessageCodec, OwnedBuf, ReleasableBuf};
 use crate::codecs::serde_compatible::serde_format::SerdeFormat;
+use crate::pool::allocator::{SharedAllocator, TpcAllocator};
 use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
-use crate::pool::allocator::{SharedAllocator, TpcAllocator};
 
 #[derive(Serialize, Deserialize)]
 enum WireEnvelope<Req, Res> {
@@ -96,7 +96,9 @@ impl OwnedBuf for VecBuf {
     }
 }
 
-impl HasAllocator for VecBuf  {
+impl ReleasableBuf for VecBuf {}
+
+impl HasAllocator for VecBuf {
     type Alloc = TpcAllocator<VecBuf>;
     type SharedAlloc = SharedAllocator<VecBuf>;
 }

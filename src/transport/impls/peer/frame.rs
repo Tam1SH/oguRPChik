@@ -1,10 +1,10 @@
-use bytes::BytesMut;
-use compio::buf::{IoBuf, IoBufMut, SetLen};
-use std::mem::MaybeUninit;
 use crate::codecs::base::OwnedBuf;
 use crate::codecs::rkyv_protocol::AlignedBuffer;
 use crate::codecs::serde_protocol::VecBuf;
 use crate::transport::stream::StreamBuf;
+use bytes::BytesMut;
+use compio::buf::{IoBuf, IoBufMut, SetLen};
+use std::mem::MaybeUninit;
 
 pub struct Frame<B: StreamBuf> {
     pub header: BytesMut,
@@ -19,7 +19,6 @@ pub(crate) enum Slot<B: StreamBuf> {
 pub struct FrameBatch<B: StreamBuf> {
     slots: Vec<Slot<B>>,
 }
-
 
 impl<B: StreamBuf> IoBuf for Slot<B> {
     fn as_init(&self) -> &[u8] {
@@ -49,7 +48,6 @@ impl<B: StreamBuf> IoBufMut for Slot<B> {
         }
     }
 }
-
 
 impl<B: StreamBuf> FrameBatch<B> {
     pub fn with_capacity(frames: usize) -> Self {
@@ -105,7 +103,6 @@ impl<'a, B: StreamBuf> Iterator for DrainFrames<'a, B> {
         Some(Frame { header, body })
     }
 }
-
 
 impl IoBuf for AlignedBuffer {
     fn as_init(&self) -> &[u8] {

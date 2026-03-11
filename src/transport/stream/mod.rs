@@ -1,9 +1,9 @@
+use crate::codecs::base::OwnedBuf;
+use compio::buf::{IoBuf, IoBufMut, SetLen};
 use compio::io::{AsyncRead, AsyncWrite};
 use socket2::SockAddr;
 use std::fmt::Display;
 use std::io;
-use compio::buf::{IoBuf, IoBufMut, SetLen};
-use crate::codecs::base::OwnedBuf;
 pub mod adapters;
 #[cfg(feature = "tcp")]
 pub mod tcp;
@@ -40,4 +40,3 @@ pub trait AcceptorBuilder: Send + Sync + 'static {
     fn local_addr(&self) -> io::Result<impl Display>;
     fn kind(&self) -> &'static str;
 }
-

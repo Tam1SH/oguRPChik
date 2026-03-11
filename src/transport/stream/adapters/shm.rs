@@ -1,6 +1,8 @@
 use crate::codecs::base::{BorrowedBuf, OwnedBuf};
 use crate::transport::base::TransportBuilder;
-use crate::transport::impls::shm::{IceoryxBuilder, IceoryxConnector, IceoryxPayload, IceoryxSinkAdapter, IceoryxSourceAdapter};
+use crate::transport::impls::shm::{
+    IceoryxBuilder, IceoryxConnector, IceoryxPayload, IceoryxSinkAdapter, IceoryxSourceAdapter,
+};
 
 #[derive(Clone)]
 pub struct ShmTransport {

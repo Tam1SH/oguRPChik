@@ -1,36 +1,45 @@
-use std::marker::PhantomData;
-use crate::low::client_per_core::{ClientConfig, ClientPerCore, ResponseGuard};
-use crate::codecs::base::{BorrowedBuf, BufferAllocator, HasAllocator, MessageCodec, OwnedBuf};
+use crate::codecs::base::{BufferAllocator, HasAllocator, MessageCodec, OwnedBuf, ReleasableBuf};
 use crate::discovery::Topology;
+use crate::low::client_per_core::{ClientConfig, ClientPerCore, ResponseGuard};
 use crate::low::runtime;
+use crate::transport::base::pool_config::PoolConfig;
 use crate::transport::base::{MessageSink, MessageSource, TransportBuilder, TransportConnector};
 use anyhow::{Result, anyhow};
 use compio::time::timeout;
+use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tracing::{debug, error, info, instrument, warn};
-use crate::transport::base::pool_config::PoolConfig;
 
-#[derive(Clone, Copy, Debug)]
-pub enum Priority {
-    Critical,
-    Normal,
-    Bulk,
-}
+type TxAlloc<Tx> = <Tx as HasAllocator>::Alloc;
 
-struct CallRequest<C: MessageCodec, Rx: BorrowedBuf> {
+struct CallRequest<C, Rx>
+where
+    C: MessageCodec,
+    Rx: ReleasableBuf,
+{
     req: C::Request,
     resp_tx: oneshot::Sender<Result<ResponseGuard<Rx, C>>>,
 }
 
-pub struct Client<C: MessageCodec, Tx: OwnedBuf, Rx: BorrowedBuf> {
+pub struct Client<C, Tx, Rx>
+where
+    C: MessageCodec,
+    Tx: OwnedBuf + HasAllocator,
+    Rx: ReleasableBuf,
+{
     workers: Arc<Vec<flume::Sender<CallRequest<C, Rx>>>>,
     rr_idx: Arc<AtomicUsize>,
-    _phantom: PhantomData<Tx>,
+    _phantom: PhantomData<(C, Tx)>,
 }
 
-impl<C: MessageCodec, Tx: OwnedBuf, Rx: BorrowedBuf> Clone for Client<C, Tx, Rx> {
+impl<C, Tx, Rx> Clone for Client<C, Tx, Rx>
+where
+    C: MessageCodec,
+    Tx: OwnedBuf + HasAllocator,
+    Rx: ReleasableBuf,
+{
     fn clone(&self) -> Self {
         Self {
             workers: self.workers.clone(),
@@ -42,10 +51,9 @@ impl<C: MessageCodec, Tx: OwnedBuf, Rx: BorrowedBuf> Clone for Client<C, Tx, Rx>
 
 impl<C, Tx, Rx> Client<C, Tx, Rx>
 where
-    C: MessageCodec<Dest = Tx>,
+    C: MessageCodec<Dest = <TxAlloc<Tx> as BufferAllocator>::Payload>,
     Tx: OwnedBuf + HasAllocator,
-    Rx: BorrowedBuf,
-    <<Tx as HasAllocator>::SharedAlloc as BufferAllocator>::SendMark: Send,
+    Rx: ReleasableBuf,
 {
     #[instrument(
         level = "info",
@@ -53,73 +61,41 @@ where
         fields(
             transport = %transport.kind(),
             num_cores = topology.map.len(),
-            expected_codec = %C::kind()
+            codec     = %C::kind(),
         )
     )]
     pub async fn connect<T>(config: ClientConfig, transport: T, topology: Topology) -> Result<Self>
     where
         T: TransportBuilder<Tx, Rx = Rx>,
     {
-        info!("Starting client connection process");
-
         if topology.transport_kind != transport.kind() {
-            let err = format!(
-                "Topology transport mismatch: registry has '{}', but transport is '{}'",
+            return Err(anyhow!(
+                "Transport mismatch: registry='{}' client='{}'",
                 topology.transport_kind,
                 transport.kind()
-            );
-            error!("{}", err);
-            return Err(anyhow!(err));
+            ));
         }
-
         if topology.codec_kind != C::kind() {
-            let err = format!(
-                "Codec mismatch: registry expects '{}', but client uses '{}'",
+            return Err(anyhow!(
+                "Codec mismatch: registry='{}' client='{}'",
                 topology.codec_kind,
                 C::kind()
-            );
-            error!("{}", err);
-            return Err(anyhow!(err));
+            ));
         }
 
         let num_cores = topology.map.len();
         let mut connectors = Vec::with_capacity(num_cores);
-
-        debug!("Building connectors for {} cores", num_cores);
-
         for i in 0..num_cores {
-            let endpoint = topology.map.get(&i).ok_or_else(|| {
-                let err = format!("Core {} not found in topology map", i);
-                error!("{}", err);
-                anyhow!(err)
-            })?;
-
-            debug!(core_id = i, endpoint = %endpoint, "Creating connector");
-
-            match transport.client_connector(endpoint.clone(), i) {
-                Ok(connector) => connectors.push(connector),
-                Err(e) => {
-                    error!(core_id = i, endpoint = %endpoint, error = %e, "Failed to create connector");
-                    return Err(e);
-                }
-            }
+            let endpoint = topology
+                .map
+                .get(&i)
+                .ok_or_else(|| anyhow!("Core {} not found in topology", i))?;
+            connectors.push(transport.client_connector(endpoint.clone(), i)?);
         }
 
-        info!("All connectors prepared, initiating connect_internal");
-
-        match Self::connect_internal(connectors, num_cores, config).await {
-            Ok(client) => {
-                info!("Client successfully connected to all cores");
-                Ok(client)
-            }
-            Err(e) => {
-                error!(error = %e, "Internal connection failed");
-                Err(e)
-            }
-        }
+        Self::connect_internal(connectors, num_cores, config).await
     }
 
-    #[instrument(skip(connectors))]
     async fn connect_internal<Conn, Si, So>(
         connectors: Vec<Conn>,
         num_cores: usize,
@@ -143,19 +119,17 @@ where
             let cfg = config.clone();
 
             runtime::spawn_on(core_id, move || async move {
-
-                type Alloc<Tx> = <Tx as HasAllocator>::SharedAlloc;
-                let allocator = Alloc::<Tx>::get(&PoolConfig::default());
+                let tx_alloc: TxAlloc<Tx> = TxAlloc::<Tx>::get(&PoolConfig::default());
 
                 let connect_res = async {
                     let connect_future = async {
                         let transport = connector.connect().await?;
-                        ClientPerCore::<C, Si, So, Alloc<Tx>, Rx>::connect(
+                        ClientPerCore::<C, Si, So, TxAlloc<Tx>, Rx>::connect(
                             transport,
                             cfg.clone(),
-                            allocator,
+                            tx_alloc,
                         )
-                            .await
+                        .await
                     };
 
                     timeout(Duration::from_secs(cfg.timeout_seconds), connect_future)
@@ -164,23 +138,20 @@ where
                             anyhow!("Connection timeout after {} seconds", cfg.timeout_seconds)
                         })?
                 }
-                    .await;
+                .await;
 
                 match connect_res {
                     Ok(mut client) => {
-                        debug!(core_id, "Worker connected successfully");
                         let _ = sync_tx.send_async(Ok(core_id)).await;
+                        debug!(core_id, "Worker connected");
 
                         while let Ok(msg) = worker_rx.recv_async().await {
                             let res = client.call(msg.req).await;
                             if msg.resp_tx.send(res).is_err() {
-                                warn!(
-                                    core_id,
-                                    "Caller dropped response channel before receiving result"
-                                );
+                                warn!(core_id, "Caller dropped response channel");
                             }
                         }
-                        info!(core_id, "Worker shutting down (channel closed)");
+                        info!(core_id, "Worker shut down");
                     }
                     Err(e) => {
                         error!(core_id, error = %e, "Worker failed to connect");
@@ -192,20 +163,13 @@ where
 
         for _ in 0..num_cores {
             match init_rx.recv_async().await {
-                Ok(Ok(core_id)) => {
-                    debug!(core_id, "Worker sync successfully");
-                }
-                Ok(Err(e)) => {
-                    error!(error = %e, "Failed to initialize one or more core workers");
-                    return Err(e);
-                }
-                Err(_) => {
-                    return Err(anyhow!("Init channel closed prematurely"));
-                }
+                Ok(Ok(id)) => debug!(core_id = id, "Worker synced"),
+                Ok(Err(e)) => return Err(e),
+                Err(_) => return Err(anyhow!("Init channel closed prematurely")),
             }
         }
 
-        info!(num_workers = workers.len(), "Client pool initialized");
+        info!(num_workers = workers.len(), "Client pool ready");
 
         Ok(Self {
             workers: Arc::new(workers),
@@ -216,18 +180,15 @@ where
 
     pub async fn call(&self, req: C::Request) -> Result<ResponseGuard<Rx, C>> {
         let idx = self.rr_idx.fetch_add(1, Ordering::Relaxed) % self.workers.len();
-        let tx = &self.workers[idx];
-
         let (resp_tx, resp_rx) = oneshot::channel();
 
-        if let Err(e) = tx.send_async(CallRequest { req, resp_tx }).await {
-            error!(error = %e, "Failed to send request: worker task died");
-            return Err(anyhow!("Worker task dropped"));
-        }
+        self.workers[idx]
+            .send_async(CallRequest { req, resp_tx })
+            .await
+            .map_err(|_| anyhow!("Worker task dropped"))?;
 
-        resp_rx.await.map_err(|e| {
-            error!(error = %e, "Worker failed to provide response (oneshot closed)");
-            anyhow!("Worker response cancelled")
-        })?
+        resp_rx
+            .await
+            .map_err(|_| anyhow!("Worker response cancelled"))?
     }
 }

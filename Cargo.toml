@@ -1,11 +1,11 @@
 [package]
 name = "ogurpchik"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 authors = ["ignatternyev54@gmail.com"]
 license = "MIT"
 description = "A transport-agnostic RPC framework for stream and memory-based communication. Built with high-performance primitives to deliver medium-performance results."
-keywords = ["rpc", "windows", "vsock", "linux"]
+keywords = ["rpc", "windows", "linux", "ipc"]
 
 [dependencies]
 
@@ -77,9 +77,28 @@ all = [
 
 dhat-heap = ["dep:dhat"]
 
-[profile.release]
-debug = true
-split-debuginfo = "packed"
-
 [dev-dependencies]
 hdrhistogram = "7.5.4"
+criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
+pprof = { version = "0.13", features = ["flamegraph", "criterion"] }
+
+
+[profile.release]
+debug            = true
+split-debuginfo  = "packed"
+
+[profile.bench]
+inherits         = "release"
+debug            = true
+split-debuginfo  = "packed"
+lto              = "thin"
+codegen-units    = 1
+
+[[bench]]
+name    = "peer_throughput"
+harness = false
+
+[[bench]]
+name    = "peer_latency"
+harness = false
+

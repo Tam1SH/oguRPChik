@@ -1,28 +1,27 @@
-use crate::codecs::base::{BufferAllocator, OwnedBuf, Envelope, MessageCodec, BorrowedBuf};
-use std::rc::Rc;
+use crate::codecs::base::{
+    BorrowedBuf, BufferAllocator, Envelope, MessageCodec, OwnedBuf, ReleasableBuf,
+};
 use crate::high::service_handler::ServiceHandler;
 use crate::transport::base::{MessageSink, MessageSource};
 use dashmap::DashMap;
+use std::rc::Rc;
 use tracing::{error, info};
 
 pub trait SessionConfig {
-    type Codec: MessageCodec<Dest = Self::OutPayload>;
-    type RxPayload: BorrowedBuf;
-    type OutPayload: OwnedBuf;
-    type Alloc: BufferAllocator<Payload = Self::OutPayload>;
+    type TxAlloc: BufferAllocator;
+    type Codec: MessageCodec<Dest = <Self::TxAlloc as BufferAllocator>::Payload>;
+    type RxPayload: ReleasableBuf;
 }
 
-impl<P, A, OutPayload, RxPayload> SessionConfig for (P, A, RxPayload)
+impl<P, TxA, RxPayload> SessionConfig for (P, TxA, RxPayload)
 where
-    P: MessageCodec<Dest = OutPayload>,
-    A: BufferAllocator<Payload = OutPayload>,
-    OutPayload: OwnedBuf,
-    RxPayload: BorrowedBuf,
+    P: MessageCodec<Dest = <TxA as BufferAllocator>::Payload>,
+    TxA: BufferAllocator,
+    RxPayload: ReleasableBuf,
 {
+    type TxAlloc = TxA;
     type Codec = P;
     type RxPayload = RxPayload;
-    type OutPayload = OutPayload;
-    type Alloc = A;
 }
 
 pub async fn run_session<C, H, Sink, Source>(
@@ -30,11 +29,11 @@ pub async fn run_session<C, H, Sink, Source>(
     sink: Sink,
     mut source: Source,
     pending: Rc<DashMap<u64, oneshot::Sender<C::RxPayload>>>,
-    allocator: C::Alloc,
+    tx_allocator: C::TxAlloc,
 ) where
     C: SessionConfig,
     H: ServiceHandler<C::Codec>,
-    Sink: MessageSink<Payload = C::OutPayload>,
+    Sink: MessageSink<Payload = <C::TxAlloc as BufferAllocator>::Payload>,
     Source: MessageSource<Payload = C::RxPayload>,
 {
     enum OnRequestAction<C: SessionConfig> {
@@ -77,12 +76,7 @@ pub async fn run_session<C, H, Sink, Source>(
         };
 
         if let OnRequestAction::SendResponse { id, resp } = action {
-            #[allow(type_alias_bounds)]
-            type Env<C: MessageCodec> = Envelope<C::Request, C::Response>;
-
-            let size_hint = size_of::<Env<C::Codec>>() * 2;
-
-            let mut out_buf = allocator.allocate(size_hint);
+            let mut out_buf = tx_allocator.allocate_hinted();
 
             if C::Codec::encode(Envelope::Response { id, payload: resp }, &mut out_buf).is_ok() {
                 let _ = sink.send(out_buf).await;

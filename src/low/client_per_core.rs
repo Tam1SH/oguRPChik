@@ -1,5 +1,6 @@
-use crate::codecs::base::{BorrowedBuf, BufferAllocator, Envelope, MessageCodec};
+use crate::codecs::base::{BufferAllocator, Envelope, MessageCodec, OwnedBuf, ReleasableBuf};
 use crate::high::service_handler::ServiceHandler;
+use crate::low::main_loop::run_session;
 use crate::transport::base::{MessageSink, MessageSource, Transport};
 use anyhow::anyhow;
 use dashmap::DashMap;
@@ -7,7 +8,6 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
-use crate::low::main_loop::run_session;
 
 #[derive(Clone, Debug)]
 pub struct ClientConfig {
@@ -22,59 +22,63 @@ impl Default for ClientConfig {
     }
 }
 
-pub struct ClientPerCore<C, Si, So, A, RxPayload>
+pub struct ClientPerCore<C, Si, So, TxA, Rx>
 where
-    C: MessageCodec,
-    Si: MessageSink<Payload = C::Dest>,
-    A: BufferAllocator<Payload = C::Dest>,
+    C: MessageCodec<Dest = TxA::Payload>,
+    Si: MessageSink<Payload = TxA::Payload>,
+    TxA: BufferAllocator,
+    Rx: ReleasableBuf,
 {
     sink: Si,
-    pending: Rc<DashMap<u64, oneshot::Sender<RxPayload>>>,
+    pending: Rc<DashMap<u64, oneshot::Sender<Rx>>>,
     next_id: Rc<AtomicU64>,
     config: ClientConfig,
-    allocator: A,
-    _phantom: PhantomData<(C, So, RxPayload)>,
+    tx_allocator: TxA,
+    _phantom: PhantomData<(C, So)>,
 }
 
-impl<C, Si, So, A, RxPayload> Clone for ClientPerCore<C, Si, So, A, RxPayload>
+impl<C, Si, So, TxA, Rx> Clone for ClientPerCore<C, Si, So, TxA, Rx>
 where
-    C: MessageCodec,
-    Si: MessageSink<Payload = C::Dest>,
-    A: BufferAllocator<Payload = C::Dest>,
+    C: MessageCodec<Dest = TxA::Payload>,
+    Si: MessageSink<Payload = TxA::Payload>,
+    TxA: BufferAllocator,
+    Rx: ReleasableBuf,
 {
     fn clone(&self) -> Self {
         Self {
-            next_id: self.next_id.clone(),
             sink: self.sink.clone(),
             pending: self.pending.clone(),
-            _phantom: PhantomData,
+            next_id: self.next_id.clone(),
             config: self.config.clone(),
-            allocator: self.allocator.clone(),
+            tx_allocator: self.tx_allocator.clone(),
+            _phantom: PhantomData,
         }
     }
 }
 
-impl<C, Si, So, A, RxPayload> ClientPerCore<C, Si, So, A, RxPayload>
+impl<C, Si, So, TxA, Rx> ClientPerCore<C, Si, So, TxA, Rx>
 where
-    C: MessageCodec,
-    Si: MessageSink<Payload = C::Dest>,
-    So: MessageSource<Payload = RxPayload>,
-    A: BufferAllocator<Payload = C::Dest>,
-    RxPayload: BorrowedBuf
+    C: MessageCodec<Dest = TxA::Payload>,
+    Si: MessageSink<Payload = TxA::Payload>,
+    So: MessageSource<Payload = Rx>,
+    TxA: BufferAllocator,
+    Rx: ReleasableBuf,
 {
     pub async fn connect<T: Transport<Si, So>>(
         transport: T,
         config: ClientConfig,
-        allocator: A,
+        tx_allocator: TxA,
     ) -> anyhow::Result<Self> {
         let (sink, source) = transport.decompose()?;
 
         let pending = Rc::new(DashMap::new());
         let p_clone = pending.clone();
-        let sink_clone = sink.clone();
-        let a_clone = allocator.clone();
+        let si_clone = sink.clone();
+        let tx_clone = tx_allocator.clone();
+
         compio::runtime::spawn(async move {
-            run_session::<(C, A, RxPayload), _, _, _>(NoOpHandler, sink_clone, source, p_clone, a_clone).await;
+            run_session::<(C, TxA, Rx), _, _, _>(NoOpHandler, si_clone, source, p_clone, tx_clone)
+                .await;
         })
         .detach();
 
@@ -82,25 +86,19 @@ where
             sink,
             pending,
             next_id: Rc::new(AtomicU64::new(0)),
-            _phantom: PhantomData,
             config,
-            allocator
+            tx_allocator,
+            _phantom: PhantomData,
         })
     }
 
-    pub async fn call(&mut self, req: C::Request) -> anyhow::Result<ResponseGuard<RxPayload, C>> {
+    pub async fn call(&mut self, req: C::Request) -> anyhow::Result<ResponseGuard<Rx, C>> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
-
         self.pending.insert(id, tx);
 
-        type CurrentProtocolMessageType<C> =
-            Envelope<<C as MessageCodec>::Request, <C as MessageCodec>::Response>;
-
-        let mut buf = self.allocator.allocate(size_of::<CurrentProtocolMessageType<C>>() * 2);
-
+        let mut buf = self.tx_allocator.allocate_hinted();
         C::encode(Envelope::Request { id, payload: req }, &mut buf)?;
-
         self.sink.send(buf).await?;
 
         let response_buf =
@@ -120,41 +118,36 @@ where
                 }
             };
 
-        C::decode(response_buf.as_ref()).map_err(|e| anyhow!("Invalid response data: {e}"))?;
-
-        Ok(ResponseGuard::try_new(response_buf)?)
+        ResponseGuard::try_new(response_buf)
     }
 }
 
-pub struct ResponseGuard<Payload: BorrowedBuf, Codec: MessageCodec> {
-    #[allow(unused)]
-    payload_guard: Payload,
-
+pub struct ResponseGuard<Rx: ReleasableBuf, Codec: MessageCodec> {
+    payload: Option<Rx>,
     view: Codec::ResponseView<'static>,
 }
 
-unsafe impl<Payload, Codec> Send for ResponseGuard<Payload, Codec>
+unsafe impl<Rx, Codec> Send for ResponseGuard<Rx, Codec>
 where
-    Payload: BorrowedBuf,
-    for<'b> Codec::ResponseView<'b>: Send,
+    Rx: ReleasableBuf + Send,
     Codec: MessageCodec,
+    for<'a> Codec::ResponseView<'a>: Send,
 {
 }
 
-impl<'a, Payload: BorrowedBuf, Codec: MessageCodec> ResponseGuard<Payload, Codec> {
-    pub fn try_new(payload: Payload) -> anyhow::Result<Self> {
+impl<Rx: ReleasableBuf, Codec: MessageCodec> ResponseGuard<Rx, Codec> {
+    pub fn try_new(payload: Rx) -> anyhow::Result<Self> {
         let (ptr, len) = {
-            let slice = payload.as_ref();
-            (slice.as_ptr(), slice.len())
+            let s = payload.as_ref();
+            (s.as_ptr(), s.len())
         };
 
-        let data_slice = unsafe { std::slice::from_raw_parts(ptr, len) };
-
-        let decoded = Codec::decode(data_slice)?;
+        let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
+        let decoded = Codec::decode(slice).map_err(|e| anyhow!("Invalid response data: {e}"))?;
 
         let view = match decoded {
             Envelope::Response { payload: v, .. } => v,
-            _ => return Err(anyhow::anyhow!("Not a response")),
+            _ => return Err(anyhow!("Not a response")),
         };
 
         let view_static = unsafe {
@@ -162,17 +155,14 @@ impl<'a, Payload: BorrowedBuf, Codec: MessageCodec> ResponseGuard<Payload, Codec
         };
 
         Ok(Self {
-            payload_guard: payload,
+            payload: Some(payload),
             view: view_static,
         })
     }
 }
 
-impl<Payload: BorrowedBuf, Codec: MessageCodec> std::ops::Deref
-    for ResponseGuard<Payload, Codec>
-{
+impl<Rx: ReleasableBuf, Codec: MessageCodec> std::ops::Deref for ResponseGuard<Rx, Codec> {
     type Target = Codec::ResponseView<'static>;
-
     fn deref(&self) -> &Self::Target {
         &self.view
     }
@@ -180,11 +170,9 @@ impl<Payload: BorrowedBuf, Codec: MessageCodec> std::ops::Deref
 
 #[derive(Clone)]
 pub struct NoOpHandler;
+
 impl<P: MessageCodec> ServiceHandler<P> for NoOpHandler {
-    async fn on_request(
-        &self,
-        _: <P as MessageCodec>::RequestView<'_>,
-    ) -> anyhow::Result<<P as MessageCodec>::Response> {
+    async fn on_request(&self, _: P::RequestView<'_>) -> anyhow::Result<P::Response> {
         Err(anyhow!("no op"))
     }
 }

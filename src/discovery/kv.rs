@@ -33,9 +33,7 @@ impl RegistryKv {
     pub fn new(base: impl Into<String>) -> Result<Self> {
         let base = base.into();
 
-        let out = reg_cmd()
-            .args(["add", &base, "/f"])
-            .output()?;
+        let out = reg_cmd().args(["add", &base, "/f"]).output()?;
 
         if !out.status.success() {
             bail!(
@@ -151,11 +149,16 @@ impl KvStore for RegistryKv {
         let path = self.full_path(key);
         tracing::debug!(key = %path, "registry write via reg.exe");
         let out = reg_cmd()
-            .args(["add", &path, "/v", "value", "/t", "REG_SZ", "/d", value, "/f"])
+            .args([
+                "add", &path, "/v", "value", "/t", "REG_SZ", "/d", value, "/f",
+            ])
             .output()?;
 
         if !out.status.success() {
-            bail!("reg.exe add failed: {}", String::from_utf8_lossy(&out.stderr));
+            bail!(
+                "reg.exe add failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
         }
         Ok(())
     }
@@ -163,12 +166,13 @@ impl KvStore for RegistryKv {
     fn read(&self, key: &str) -> Result<String> {
         let path = self.full_path(key);
         tracing::debug!(key = %path, "registry read via reg.exe");
-        let out = reg_cmd()
-            .args(["query", &path, "/v", "value"])
-            .output()?;
+        let out = reg_cmd().args(["query", &path, "/v", "value"]).output()?;
 
         if !out.status.success() {
-            bail!("reg.exe query failed: {}", String::from_utf8_lossy(&out.stderr));
+            bail!(
+                "reg.exe query failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
         }
 
         let stdout = String::from_utf8(out.stdout)?;
@@ -190,9 +194,7 @@ impl KvStore for RegistryKv {
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(200));
 
-                let out = reg_cmd()
-                    .args(["query", &path, "/v", "value"])
-                    .output();
+                let out = reg_cmd().args(["query", &path, "/v", "value"]).output();
 
                 let out = match out {
                     Ok(o) => o,
@@ -239,11 +241,12 @@ impl KvStore for RegistryKv {
     fn delete(&self, key: &str) -> Result<()> {
         let path = self.full_path(key);
         tracing::debug!(key = %path, "registry delete via reg.exe");
-        let out = reg_cmd()
-            .args(["delete", &path, "/f"])
-            .output()?;
+        let out = reg_cmd().args(["delete", &path, "/f"]).output()?;
         if !out.status.success() {
-            bail!("reg.exe delete failed: {}", String::from_utf8_lossy(&out.stderr));
+            bail!(
+                "reg.exe delete failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
         }
         Ok(())
     }
