@@ -1,13 +1,12 @@
 use std::cell::RefCell;
 use crate::codecs::base::{
-    BorrowedBuf, BufferAllocator, Envelope, MessageCodec, OwnedBuf, ReleasableBuf,
+    BufferAllocator, Envelope, MessageCodec, ReleasableBuf,
 };
 use crate::high::service_handler::ServiceHandler;
 use crate::transport::base::{MessageSink, MessageSource};
-use dashmap::DashMap;
 use std::rc::Rc;
 use rustc_hash::FxHashMap;
-use tracing::{error, info};
+use tracing::info;
 use local_sync::oneshot;
 
 pub trait SessionConfig {
@@ -39,14 +38,6 @@ pub async fn run_session<C, H, Sink, Source>(
     Sink: MessageSink<Payload = <C::TxAlloc as BufferAllocator>::Payload>,
     Source: MessageSource<Payload = C::RxPayload>,
 {
-    enum OnRequestAction<C: SessionConfig> {
-        SendResponse {
-            id: u64,
-            resp: <<C as SessionConfig>::Codec as MessageCodec>::Response,
-        },
-        DoNothing,
-    }
-
     info!("entering main loop");
 
     while let Some(raw) = source.recv().await {

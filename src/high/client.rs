@@ -7,10 +7,8 @@ use crate::transport::base::{MessageSink, MessageSource, TransportBuilder, Trans
 use anyhow::{Result, anyhow};
 use compio::time::timeout;
 use std::marker::PhantomData;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, error, info, instrument};
 
 type TxAlloc<Tx> = <Tx as HasAllocator>::Alloc;
 

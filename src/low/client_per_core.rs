@@ -1,10 +1,9 @@
 use std::cell::RefCell;
-use crate::codecs::base::{BufferAllocator, Envelope, MessageCodec, OwnedBuf, ReleasableBuf};
+use crate::codecs::base::{BufferAllocator, Envelope, MessageCodec, ReleasableBuf};
 use crate::high::service_handler::ServiceHandler;
 use crate::low::main_loop::run_session;
 use crate::transport::base::{MessageSink, MessageSource, Transport};
 use anyhow::anyhow;
-use dashmap::DashMap;
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -125,6 +124,7 @@ where
 }
 
 pub struct ResponseGuard<Rx: ReleasableBuf, Codec: MessageCodec> {
+    #[allow(unused)]
     payload: Option<Rx>,
     view: Codec::ResponseView<'static>,
 }

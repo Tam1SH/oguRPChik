@@ -1,7 +1,6 @@
 pub mod pool_config;
 
 use crate::codecs::base::{BorrowedBuf, OwnedBuf};
-use crate::transport::base::pool_config::PoolConfig;
 use std::io;
 use std::sync::Arc;
 use std::task::{Context, Poll};

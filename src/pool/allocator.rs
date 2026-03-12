@@ -1,6 +1,5 @@
 use crate::codecs::base::{BufferAllocator, OwnedBuf, ReleasableBuf};
 use crate::pool::base::PoolStrategy;
-use crate::pool::buf_guard::BufGuard;
 use crate::pool::pool_local::TpcStrategy;
 use crate::pool::pool_shared::SharedStrategy;
 use crate::pool::pool_stats::{PoolStats, PoolStatsSnapshot};

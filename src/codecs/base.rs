@@ -1,4 +1,3 @@
-use crate::pool::buf_guard::BufGuard;
 use crate::pool::pool_stats::{PoolStats, PoolStatsSnapshot};
 use crate::transport::base::pool_config::PoolConfig;
 use anyhow::Result;

@@ -1,5 +1,4 @@
-use crate::codecs::base::{BufferAllocator, HasAllocator, OwnedBuf, ReleasableBuf};
-use std::mem;
+use crate::codecs::base::{BufferAllocator, OwnedBuf, ReleasableBuf};
 
 #[derive(Clone)]
 pub struct BufGuard<B: OwnedBuf, A: BufferAllocator<Payload = B>> {

@@ -1,5 +1,5 @@
 use crate::codecs::base::{
-    BorrowedBuf, BufferAllocator, HasAllocator, MessageCodec, OwnedBuf, ReleasableBuf,
+    BufferAllocator, HasAllocator, MessageCodec, OwnedBuf, ReleasableBuf,
 };
 use crate::discovery::kv::{KvStore, default_kv};
 use crate::discovery::{RpcTopologyRegistry, ServiceRegistration, Topology};
@@ -11,6 +11,7 @@ use crate::transport::base::TransportBuilder;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use tracing::{debug, info, instrument};
+use crate::discovery::Scope;
 
 /// High-level builder for RPC nodes.
 ///
@@ -121,6 +122,11 @@ impl Node<NoServe, NoConnect> {
             kv: Arc::new(default_kv()?),
             threads: 1,
         })
+    }
+
+    pub fn scope(mut self, scope: Scope) -> anyhow::Result<Self> {
+        self.kv = scope.into_kv()?;
+        Ok(self)
     }
 
     pub fn kv(mut self, kv: Arc<dyn KvStore>) -> Self {

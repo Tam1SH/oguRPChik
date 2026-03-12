@@ -8,6 +8,44 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub mod kv;
+#[cfg(unix)]
+pub mod tmpfs;
+
+
+// ── Scope enum ────────────────────────────────────────────────────────────────
+
+/// Controls which KV backend (and thus which discovery scope) the node uses.
+#[derive(Debug, Clone, Copy, Default)]
+pub enum Scope {
+    /// Cross-process / cross-VM discovery.
+    ///
+    /// Uses the Windows Registry (directly on Windows, via `reg.exe` from WSL/Linux).
+    /// Suitable when the server and client may live in different VMs or WSL instances.
+    #[default]
+    Shared,
+
+    /// Same-host discovery via native OS mechanisms.
+    ///
+    /// On Linux: tmpfs (`/run/user/<uid>/ogurpchik`) + `inotify`.
+    /// On Windows: Windows Registry (same as `Shared` — already native).
+    Internal,
+}
+
+impl Scope {
+    pub fn into_kv(self) -> anyhow::Result<Arc<dyn KvStore>> {
+        match self {
+            Scope::Shared => Ok(Arc::new(crate::discovery::kv::default_kv()?)),
+            Scope::Internal => {
+                #[cfg(unix)]
+                return Ok(Arc::new(crate::discovery::tmpfs::TmpfsKv::new()?));
+
+                #[cfg(windows)]
+                Ok(Arc::new(crate::discovery::kv::default_kv()?))
+            }
+        }
+    }
+}
+
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct Topology {
@@ -37,15 +75,20 @@ impl Topology {
 
     pub async fn watch(service_name: &str, kv: Arc<dyn KvStore>) -> anyhow::Result<()> {
         let rx = kv.watch(&format!("Services\\{}", service_name))?;
-        loop {
-            match rx.try_recv() {
-                Ok(Some(_)) => return Ok(()),
-                Ok(None) => {
-                    compio::time::sleep(Duration::from_millis(10)).await;
+        let (tx, done) = futures::channel::oneshot::channel();
+
+        std::thread::spawn(move || {
+            let result = loop {
+                match rx.try_recv() {
+                    Ok(Some(_)) => break Ok(()),
+                    Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+                    Err(e) => break Err(anyhow::anyhow!("{:?}", e)),
                 }
-                Err(e) => return Err(anyhow::anyhow!("{:?}", e)),
-            }
-        }
+            };
+            let _ = tx.send(result);
+        });
+
+        done.await?
     }
 }
 
