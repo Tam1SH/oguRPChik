@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use crate::codecs::base::BufferAllocator;
 use crate::high::service_handler::ServiceHandler;
 use crate::low::main_loop::{SessionConfig, run_session};
@@ -12,6 +13,7 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
+use rustc_hash::FxHashMap;
 use tracing::{error, info};
 
 pub struct ServerWorker<C: SessionConfig, H: ServiceHandler<C::Codec>> {
@@ -19,7 +21,7 @@ pub struct ServerWorker<C: SessionConfig, H: ServiceHandler<C::Codec>> {
 }
 
 impl<C: SessionConfig, H: ServiceHandler<C::Codec>> ServerWorker<C, H> {
-    pub fn spawn<B, Sink, Source>(
+    pub async fn spawn<B, Sink, Source>(
         core_id: usize,
         builder: B,
         handler: H,
@@ -61,7 +63,7 @@ impl<C: SessionConfig, H: ServiceHandler<C::Codec>> ServerWorker<C, H> {
 
                         compio::runtime::spawn(async move {
                             info!("run_session task started");
-                            let pending = Rc::new(DashMap::new());
+                            let pending = Rc::new(RefCell::new(FxHashMap::default()));
                             run_session::<C, _, _, _>(h, sink, source, pending, alloc).await;
                         })
                         .detach();
@@ -72,7 +74,7 @@ impl<C: SessionConfig, H: ServiceHandler<C::Codec>> ServerWorker<C, H> {
                     }
                 }
             }
-        });
+        }).await;
         Ok(())
     }
 }

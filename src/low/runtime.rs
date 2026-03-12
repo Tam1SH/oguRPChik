@@ -6,7 +6,7 @@ use tracing::{info, trace};
 type Job = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()>>> + Send>;
 
 struct CoreRuntime {
-    tx: flume::Sender<Job>,
+    tx: kanal::AsyncSender<Job>,
 }
 
 static POOL: OnceLock<Vec<CoreRuntime>> = OnceLock::new();
@@ -19,7 +19,7 @@ pub(crate) fn init(num_cores: usize) {
     let mut runtimes = Vec::with_capacity(num_cores);
 
     for core_id in 0..num_cores {
-        let (tx, rx) = flume::unbounded::<Job>();
+        let (tx, rx) = kanal::unbounded_async::<Job>();
 
         std::thread::spawn(move || {
             let _ = affinity::set_thread_affinity(&[core_id]);
@@ -28,7 +28,7 @@ pub(crate) fn init(num_cores: usize) {
             info!("Core {} runtime operational", core_id);
 
             runtime.block_on(async move {
-                while let Ok(factory) = rx.recv_async().await {
+                while let Ok(factory) = rx.recv().await {
                     let local_future = factory();
                     trace!("append new task");
                     compio::runtime::spawn(local_future).detach();
@@ -41,7 +41,7 @@ pub(crate) fn init(num_cores: usize) {
     let _ = POOL.set(runtimes);
 }
 
-pub fn spawn_on<F, Fut>(core_id: usize, factory: F)
+pub async fn spawn_on<F, Fut>(core_id: usize, factory: F)
 where
     F: FnOnce() -> Fut + Send + 'static,
     Fut: Future<Output = ()> + 'static,
@@ -51,7 +51,7 @@ where
 
     let job = Box::new(move || Box::pin(factory()) as Pin<Box<dyn Future<Output = ()>>>);
 
-    let _ = core.tx.send(job);
+    let _ = core.tx.send(job).await;
 }
 
 pub fn core_count() -> usize {

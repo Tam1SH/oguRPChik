@@ -141,6 +141,7 @@ where
                 Some(registry.clone()),
                 allocator,
             )
+            .await
             .with_context(|| format!("Failed to spawn worker on core {}", core_id))?;
         }
 

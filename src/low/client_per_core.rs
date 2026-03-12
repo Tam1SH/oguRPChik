@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use crate::codecs::base::{BufferAllocator, Envelope, MessageCodec, OwnedBuf, ReleasableBuf};
 use crate::high::service_handler::ServiceHandler;
 use crate::low::main_loop::run_session;
@@ -8,7 +9,8 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
-
+use rustc_hash::FxHashMap;
+use local_sync::oneshot;
 #[derive(Clone, Debug)]
 pub struct ClientConfig {
     pub timeout_seconds: u64,
@@ -30,7 +32,7 @@ where
     Rx: ReleasableBuf,
 {
     sink: Si,
-    pending: Rc<DashMap<u64, oneshot::Sender<Rx>>>,
+    pending: Rc<RefCell<FxHashMap<u64, oneshot::Sender<Rx>>>>,
     next_id: Rc<AtomicU64>,
     config: ClientConfig,
     tx_allocator: TxA,
@@ -71,7 +73,7 @@ where
     ) -> anyhow::Result<Self> {
         let (sink, source) = transport.decompose()?;
 
-        let pending = Rc::new(DashMap::new());
+        let pending = Rc::new(RefCell::new(FxHashMap::default()));
         let p_clone = pending.clone();
         let si_clone = sink.clone();
         let tx_clone = tx_allocator.clone();
@@ -95,7 +97,7 @@ where
     pub async fn call(&mut self, req: C::Request) -> anyhow::Result<ResponseGuard<Rx, C>> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
-        self.pending.insert(id, tx);
+        self.pending.borrow_mut().insert(id, tx);
 
         let mut buf = self.tx_allocator.allocate_hinted();
         C::encode(Envelope::Request { id, payload: req }, &mut buf)?;
@@ -106,11 +108,11 @@ where
             {
                 Ok(Ok(b)) => b,
                 Ok(Err(e)) => {
-                    self.pending.remove(&id);
+                    self.pending.borrow_mut().remove(&id);
                     return Err(anyhow!("Channel closed").context(e));
                 }
                 Err(_) => {
-                    self.pending.remove(&id);
+                    self.pending.borrow_mut().remove(&id);
                     return Err(anyhow!(
                         "Request timeout ({}s)",
                         self.config.timeout_seconds

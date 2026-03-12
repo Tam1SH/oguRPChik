@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 pub mod kv;
 
@@ -34,8 +35,17 @@ impl Topology {
         Self::resolve(service_name, &default_kv()?)
     }
 
-    pub fn watch(service_name: &str, kv: Arc<dyn KvStore>) -> anyhow::Result<flume::Receiver<()>> {
-        kv.watch(&format!("Services\\{}", service_name))
+    pub async fn watch(service_name: &str, kv: Arc<dyn KvStore>) -> anyhow::Result<()> {
+        let rx = kv.watch(&format!("Services\\{}", service_name))?;
+        loop {
+            match rx.try_recv() {
+                Ok(Some(_)) => return Ok(()),
+                Ok(None) => {
+                    compio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(e) => return Err(anyhow::anyhow!("{:?}", e)),
+            }
+        }
     }
 }
 

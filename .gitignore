@@ -3,3 +3,4 @@
 /dhat-heap.json
 /profile.json.gz
 /benches/target
+/benches/profile.json.gz

@@ -20,7 +20,7 @@ where
     Rx: ReleasableBuf,
 {
     req: C::Request,
-    resp_tx: oneshot::Sender<Result<ResponseGuard<Rx, C>>>,
+    resp_tx: kanal::AsyncSender<Result<ResponseGuard<Rx, C>>>,
 }
 
 pub struct Client<C, Tx, Rx>
@@ -29,8 +29,7 @@ where
     Tx: OwnedBuf + HasAllocator,
     Rx: ReleasableBuf,
 {
-    workers: Arc<Vec<flume::Sender<CallRequest<C, Rx>>>>,
-    rr_idx: Arc<AtomicUsize>,
+    sender: kanal::AsyncSender<CallRequest<C, Rx>>,
     _phantom: PhantomData<(C, Tx)>,
 }
 
@@ -42,8 +41,7 @@ where
 {
     fn clone(&self) -> Self {
         Self {
-            workers: self.workers.clone(),
-            rr_idx: self.rr_idx.clone(),
+            sender: self.sender.clone(),
             _phantom: PhantomData,
         }
     }
@@ -108,15 +106,13 @@ where
     {
         runtime::init(num_cores);
 
-        let mut workers = Vec::with_capacity(num_cores);
-        let (init_tx, init_rx) = flume::bounded::<Result<usize>>(num_cores);
+        let (init_tx, init_rx) = kanal::unbounded_async::<Result<usize>>();
+        let (worker_tx, worker_rx) = kanal::unbounded_async::<CallRequest<C, Rx>>();
 
         for (core_id, connector) in connectors.into_iter().enumerate() {
-            let (worker_tx, worker_rx) = flume::unbounded::<CallRequest<C, Rx>>();
-            workers.push(worker_tx);
-
             let sync_tx = init_tx.clone();
             let cfg = config.clone();
+            let rx = worker_rx.clone();
 
             runtime::spawn_on(core_id, move || async move {
                 let tx_alloc: TxAlloc<Tx> = TxAlloc::<Tx>::get(&PoolConfig::default());
@@ -129,65 +125,62 @@ where
                             cfg.clone(),
                             tx_alloc,
                         )
-                        .await
+                            .await
                     };
-
                     timeout(Duration::from_secs(cfg.timeout_seconds), connect_future)
                         .await
-                        .map_err(|_| {
-                            anyhow!("Connection timeout after {} seconds", cfg.timeout_seconds)
-                        })?
+                        .map_err(|_| anyhow!("Connection timeout after {}s", cfg.timeout_seconds))?
                 }
-                .await;
+                    .await;
 
                 match connect_res {
                     Ok(mut client) => {
-                        let _ = sync_tx.send_async(Ok(core_id)).await;
+                        let _ = sync_tx.send(Ok(core_id)).await;
                         debug!(core_id, "Worker connected");
 
-                        while let Ok(msg) = worker_rx.recv_async().await {
+                        while let Ok(msg) = rx.recv().await {
                             let res = client.call(msg.req).await;
-                            if msg.resp_tx.send(res).is_err() {
-                                warn!(core_id, "Caller dropped response channel");
+                            if msg.resp_tx.send(res).await.is_err() {
+                                debug!(core_id, "Caller dropped response channel");
                             }
                         }
                         info!(core_id, "Worker shut down");
                     }
                     Err(e) => {
                         error!(core_id, error = %e, "Worker failed to connect");
-                        let _ = sync_tx.send_async(Err(e)).await;
+                        let _ = sync_tx.send(Err(e)).await;
                     }
                 }
-            });
+            }).await;
         }
 
         for _ in 0..num_cores {
-            match init_rx.recv_async().await {
+            match init_rx.recv().await {
                 Ok(Ok(id)) => debug!(core_id = id, "Worker synced"),
                 Ok(Err(e)) => return Err(e),
                 Err(_) => return Err(anyhow!("Init channel closed prematurely")),
             }
         }
 
-        info!(num_workers = workers.len(), "Client pool ready");
+        info!(num_workers = num_cores, "Client pool ready");
 
         Ok(Self {
-            workers: Arc::new(workers),
-            rr_idx: Arc::new(AtomicUsize::new(0)),
+            sender: worker_tx,
             _phantom: PhantomData,
         })
     }
 
     pub async fn call(&self, req: C::Request) -> Result<ResponseGuard<Rx, C>> {
-        let idx = self.rr_idx.fetch_add(1, Ordering::Relaxed) % self.workers.len();
-        let (resp_tx, resp_rx) = oneshot::channel();
 
-        self.workers[idx]
-            .send_async(CallRequest { req, resp_tx })
+        let (resp_tx, resp_rx) = kanal::bounded_async(1);
+
+        self.sender
+            .send(CallRequest { req, resp_tx })
             .await
             .map_err(|_| anyhow!("Worker task dropped"))?;
 
         resp_rx
+            .recv()
             .await
             .map_err(|_| anyhow!("Worker response cancelled"))?
     }

@@ -1,0 +1,67 @@
+[package]
+name        = "benches"
+version     = "0.1.0"
+edition     = "2021"
+publish     = false
+
+[dependencies]
+ogurpchik = { path = "../", features = ["all"] }
+
+anyhow       = "1"
+bytes        = "1"
+compio       = { version = "0.18.0", features = ["runtime"] }
+futures      = "0.3"
+tokio        = { version = "1", features = ["rt", "sync"] }
+rkyv = "0.8.15"
+serde = { version = "1.0.228", features = ["derive"] }
+criterion   = { version = "0.5", features = ["html_reports", "async_tokio"] }
+dashmap = "6.1.0"
+oneshot = "0.1.13"
+local-sync = "0.1.1"
+rustc-hash = "2.1.1"
+
+[[bench]]
+name    = "peer_throughput"
+path    = "src/peer_throughput.rs"
+harness = false
+
+[[bench]]
+name    = "peer_latency"
+path    = "src/peer_latency.rs"
+harness = false
+
+[[bench]]
+name    = "rpc_latency"
+path    = "src/rpc_latency.rs"
+harness = false
+
+[[bench]]
+name    = "rpc_throughput"
+path    = "src/rpc_throughput.rs"
+harness = false
+
+[[bench]]
+name    = "codec_bench"
+path    = "codec.rs"
+harness = false
+
+[[bench]]
+name    = "session_bench"
+path    = "session.rs"
+harness = false
+
+[[bench]]
+name    = "per_core_bench"
+path    = "src/per_core.rs"
+harness = false
+
+[profile.release]
+debug           = true
+split-debuginfo = "packed"
+
+[profile.bench]
+inherits        = "release"
+debug           = true
+split-debuginfo = "packed"
+lto             = "thin"
+codegen-units   = 1

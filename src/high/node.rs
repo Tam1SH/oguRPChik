@@ -369,8 +369,7 @@ async fn resolve_remote(
     match wait_for {
         Some(name) => {
             info!(service = %name, "Waiting for remote service");
-            let rx = Topology::watch(name, kv.clone())?;
-            rx.recv_async().await?;
+            Topology::watch(name, kv.clone()).await?;
             info!(service = %name, "Remote service appeared");
             let t = Topology::resolve(name, kv.as_ref())?;
             debug!(service = %name, topology = ?t, "Topology resolved");

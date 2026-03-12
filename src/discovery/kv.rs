@@ -3,7 +3,7 @@ use anyhow::{Result, bail};
 pub trait KvStore: Send + Sync + 'static {
     fn write(&self, key: &str, value: &str) -> Result<()>;
     fn read(&self, key: &str) -> Result<String>;
-    fn watch(&self, key: &str) -> Result<flume::Receiver<()>>;
+    fn watch(&self, key: &str) -> Result<kanal::Receiver<()>>;
     fn delete(&self, key: &str) -> Result<()>;
 }
 
@@ -78,7 +78,7 @@ impl KvStore for RegistryKv {
         Ok(subkey.get_value("value")?)
     }
 
-    fn watch(&self, key: &str) -> Result<flume::Receiver<()>> {
+    fn watch(&self, key: &str) -> Result<kanal::Receiver<()>> {
         use windows::Win32::System::Registry::{
             HKEY, REG_NOTIFY_CHANGE_LAST_SET, RegNotifyChangeKeyValue,
         };
@@ -88,7 +88,7 @@ impl KvStore for RegistryKv {
         let path = self.full_path(key);
         let path_owned = path.trim_start_matches("HKCU\\").to_string();
         tracing::debug!(key = %path_owned, "registry watch started");
-        let (tx, rx) = flume::unbounded();
+        let (tx, rx) = kanal::unbounded();
 
         std::thread::spawn(move || {
             let key = loop {
@@ -184,10 +184,10 @@ impl KvStore for RegistryKv {
             .ok_or_else(|| anyhow::anyhow!("value not found in key '{}'", path))
     }
 
-    fn watch(&self, key: &str) -> Result<flume::Receiver<()>> {
+    fn watch(&self, key: &str) -> Result<kanal::Receiver<()>> {
         let path = self.full_path(key);
         tracing::debug!(key = %path, "registry watch started via reg.exe polling");
-        let (tx, rx) = flume::unbounded();
+        let (tx, rx) = kanal::unbounded();
 
         std::thread::spawn(move || {
             let mut last: Option<String> = None;

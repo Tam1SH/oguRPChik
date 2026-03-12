@@ -10,7 +10,7 @@ use tracing::{debug, error, trace};
 pub enum ReactorCmd {
     Attach(
         Listener<Service>,
-        flume::Sender<WaitSetAttachmentId<Service>>,
+        kanal::Sender<WaitSetAttachmentId<Service>>,
     ),
 }
 
@@ -18,7 +18,7 @@ unsafe impl Send for ReactorCmd {}
 
 pub struct GlobalReactor {
     wakers: Arc<DashMap<WaitSetAttachmentId<Service>, Waker>>,
-    cmd_tx: flume::Sender<ReactorCmd>,
+    cmd_tx: kanal::Sender<ReactorCmd>,
 }
 
 lazy_static::lazy_static! {
@@ -31,7 +31,7 @@ impl GlobalReactor {
     }
 
     fn start() -> Arc<Self> {
-        let (cmd_tx, cmd_rx) = flume::unbounded::<ReactorCmd>();
+        let (cmd_tx, cmd_rx) = kanal::unbounded::<ReactorCmd>();
         let wakers = Arc::new(DashMap::<WaitSetAttachmentId<Service>, Waker>::new());
         let wakers_inner = wakers.clone();
 
@@ -43,7 +43,7 @@ impl GlobalReactor {
             let mut attachments = Vec::new();
 
             loop {
-                while let Ok(cmd) = cmd_rx.try_recv() {
+                while let Ok(Some(cmd)) = cmd_rx.try_recv() {
                     match cmd {
                         ReactorCmd::Attach(listener, reply_tx) => {
                             let boxed = Box::new(listener);
@@ -87,7 +87,7 @@ impl GlobalReactor {
         self.wakers.remove(id);
     }
     pub fn attach(&self, listener: Listener<Service>) -> WaitSetAttachmentId<Service> {
-        let (tx, rx) = flume::bounded(1);
+        let (tx, rx) = kanal::bounded(1);
         self.cmd_tx.send(ReactorCmd::Attach(listener, tx)).unwrap();
         rx.recv().expect("Global Reactor died")
     }
