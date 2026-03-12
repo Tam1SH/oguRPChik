@@ -64,41 +64,22 @@ stream = []
 
 tcp = ["stream"]
 vsock = ["stream"]
+uds = ["stream"]
 
 all = [
     "rkyv-codec",
     "bitcode-codec",
     "shm",
     "tcp",
+    "uds",
     "vsock",
     "stream"
 ]
 
-
 dhat-heap = ["dep:dhat"]
 
-[dev-dependencies]
-hdrhistogram = "7.5.4"
-criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
-pprof = { version = "0.13", features = ["flamegraph", "criterion"] }
-
-
 [profile.release]
-debug            = true
-split-debuginfo  = "packed"
-
-[profile.bench]
-inherits         = "release"
-debug            = true
-split-debuginfo  = "packed"
-lto              = "thin"
-codegen-units    = 1
-
-[[bench]]
-name    = "peer_throughput"
-harness = false
-
-[[bench]]
-name    = "peer_latency"
-harness = false
+split-debuginfo = "packed"
+lto = "thin"
+codegen-units = 1
 

@@ -9,6 +9,8 @@ pub mod adapters;
 pub mod tcp;
 #[cfg(feature = "vsock")]
 pub mod vsock;
+#[cfg(feature = "uds")]
+pub mod uds;
 
 pub trait StreamBuf: OwnedBuf + SetLen + IoBufMut + IoBuf {}
 impl<T: OwnedBuf + SetLen + IoBufMut + IoBuf> StreamBuf for T {}

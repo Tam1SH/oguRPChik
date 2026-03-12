@@ -4,3 +4,5 @@ pub mod shm;
 pub mod tcp;
 #[cfg(feature = "vsock")]
 pub mod vsock;
+#[cfg(feature = "uds")]
+pub mod uds;
