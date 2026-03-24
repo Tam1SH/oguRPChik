@@ -227,6 +227,7 @@ checksum = "9b84ee96a86948d04388f3a0b8c36b9f0a6b40b3528ac0d65737e53632fb37fe"
 dependencies = [
  "compio-buf",
  "compio-driver",
+ "compio-fs",
  "compio-io",
  "compio-log",
  "compio-macros",
@@ -272,6 +273,25 @@ dependencies = [
  "socket2",
  "synchrony",
  "thin-cell",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "compio-fs"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65ee36e1acf2cec4835efe9a986c012b2462c5ef53580e4ee84ae6d5a3d8e3b3"
+dependencies = [
+ "cfg-if",
+ "cfg_aliases",
+ "compio-buf",
+ "compio-driver",
+ "compio-io",
+ "compio-runtime",
+ "libc 0.2.181",
+ "os_pipe",
+ "pin-project-lite",
+ "widestring",
  "windows-sys 0.61.2",
 ]
 
@@ -1230,6 +1250,16 @@ name = "oneshot"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "269bca4c2591a28585d6bf10d9ed0332b7d76900a1b02bec41bdc3a2cdcda107"
+
+[[package]]
+name = "os_pipe"
+version = "1.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
+dependencies = [
+ "libc 0.2.181",
+ "windows-sys 0.48.0",
+]
 
 [[package]]
 name = "parking_lot"

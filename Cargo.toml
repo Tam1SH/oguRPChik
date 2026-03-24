@@ -66,6 +66,7 @@ stream = []
 tcp = ["stream"]
 vsock = ["stream"]
 uds = ["stream"]
+npipe = ["stream", "compio/fs"]
 
 all = [
     "rkyv-codec",
@@ -74,6 +75,7 @@ all = [
     "tcp",
     "uds",
     "vsock",
+    "npipe",
     "stream"
 ]
 
@@ -83,4 +85,3 @@ dhat-heap = ["dep:dhat"]
 split-debuginfo = "packed"
 lto = "thin"
 codegen-units = 1
-

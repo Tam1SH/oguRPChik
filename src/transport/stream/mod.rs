@@ -4,13 +4,16 @@ use compio::io::{AsyncRead, AsyncWrite};
 use socket2::SockAddr;
 use std::fmt::Display;
 use std::io;
+
 pub mod adapters;
+#[cfg(all(feature = "npipe", windows))]
+pub mod npipe;
 #[cfg(feature = "tcp")]
 pub mod tcp;
-#[cfg(feature = "vsock")]
-pub mod vsock;
 #[cfg(feature = "uds")]
 pub mod uds;
+#[cfg(feature = "vsock")]
+pub mod vsock;
 
 pub trait StreamBuf: OwnedBuf + SetLen + IoBufMut + IoBuf {}
 impl<T: OwnedBuf + SetLen + IoBufMut + IoBuf> StreamBuf for T {}

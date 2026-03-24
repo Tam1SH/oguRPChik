@@ -33,13 +33,13 @@ impl AcceptorBuilder for UdsAcceptorBuilder {
     type Stream = UnixStream;
     type Acceptor = UnixListener;
 
-    fn local_addr(&self) -> io::Result<impl Display> {
-        Ok(self.path.display().to_string())
-    }
-
     async fn bind(self) -> io::Result<Self::Acceptor> {
         let _ = std::fs::remove_file(&self.path);
         UnixListener::bind(&self.path).await
+    }
+
+    fn local_addr(&self) -> io::Result<impl Display> {
+        Ok(self.path.display().to_string())
     }
 
     fn kind(&self) -> &'static str {
