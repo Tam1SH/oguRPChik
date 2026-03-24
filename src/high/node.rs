@@ -7,6 +7,7 @@ use crate::high::client::Client;
 use crate::high::server::setup;
 use crate::high::service_handler::ServiceHandler;
 use crate::low::client_per_core::ClientConfig;
+use crate::low::handshake::{ConnectionMode, HandshakeMode};
 use crate::transport::base::TransportBuilder;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -105,13 +106,50 @@ pub struct ServeConfig<H, T, Codec> {
     transport: T,
     handler: H,
     publish_as: Option<String>,
+    handshake: HandshakeMode,
+    connection_mode: ConnectionMode,
     _codec: PhantomData<Codec>,
 }
 pub struct ConnectConfig<T, Codec> {
     transport: T,
     wait_for: Option<String>,
     config: Option<ClientConfig>,
+    handshake: HandshakeMode,
     _codec: PhantomData<Codec>,
+}
+
+pub trait ConfigureServer {
+    fn set_server_handshake(&mut self, handshake: HandshakeMode);
+    fn set_connection_mode(&mut self, mode: ConnectionMode);
+}
+
+impl ConfigureServer for NoServe {
+    fn set_server_handshake(&mut self, _: HandshakeMode) {}
+    fn set_connection_mode(&mut self, _: ConnectionMode) {}
+}
+
+impl<H, T, Codec> ConfigureServer for ServeConfig<H, T, Codec> {
+    fn set_server_handshake(&mut self, handshake: HandshakeMode) {
+        self.handshake = handshake;
+    }
+
+    fn set_connection_mode(&mut self, mode: ConnectionMode) {
+        self.connection_mode = mode;
+    }
+}
+
+pub trait ConfigureClient {
+    fn set_client_handshake(&mut self, handshake: HandshakeMode);
+}
+
+impl ConfigureClient for NoConnect {
+    fn set_client_handshake(&mut self, _: HandshakeMode) {}
+}
+
+impl<T, Codec> ConfigureClient for ConnectConfig<T, Codec> {
+    fn set_client_handshake(&mut self, handshake: HandshakeMode) {
+        self.handshake = handshake;
+    }
 }
 
 impl Node<NoServe, NoConnect> {
@@ -147,6 +185,47 @@ impl<S, C> Node<S, C> {
     }
 }
 
+impl<S, C> Node<S, C>
+where
+    S: ConfigureServer,
+    C: ConfigureClient,
+{
+    pub fn auth_hmac(mut self, secret: impl Into<Vec<u8>>) -> Self {
+        let handshake = HandshakeMode::hmac(secret);
+        self.serve.set_server_handshake(handshake.clone());
+        self.connect.set_client_handshake(handshake);
+        self
+    }
+
+    pub fn handshake_version_only(mut self) -> Self {
+        let handshake = HandshakeMode::version_only();
+        self.serve.set_server_handshake(handshake.clone());
+        self.connect.set_client_handshake(handshake);
+        self
+    }
+
+    pub fn auth_disabled(mut self) -> Self {
+        self.serve.set_server_handshake(HandshakeMode::Disabled);
+        self.connect.set_client_handshake(HandshakeMode::Disabled);
+        self
+    }
+}
+
+impl<S, C> Node<S, C>
+where
+    S: ConfigureServer,
+{
+    pub fn one_to_one(mut self) -> Self {
+        self.serve.set_connection_mode(ConnectionMode::OneToOne);
+        self
+    }
+
+    pub fn one_to_many(mut self) -> Self {
+        self.serve.set_connection_mode(ConnectionMode::OneToMany);
+        self
+    }
+}
+
 impl<C> Node<NoServe, C> {
     pub fn serve<Codec, H, T>(self, transport: T, handler: H) -> Node<ServeConfig<H, T, Codec>, C>
     where
@@ -159,6 +238,8 @@ impl<C> Node<NoServe, C> {
                 transport,
                 handler,
                 publish_as: None,
+                handshake: HandshakeMode::Disabled,
+                connection_mode: ConnectionMode::OneToMany,
                 _codec: PhantomData,
             },
             connect: self.connect,
@@ -180,6 +261,7 @@ impl<S> Node<S, NoConnect> {
                 transport,
                 wait_for: None,
                 config: None,
+                handshake: HandshakeMode::Disabled,
                 _codec: PhantomData,
             },
             kv: self.kv,
@@ -207,6 +289,12 @@ impl<S, T, Codec> Node<S, ConnectConfig<T, Codec>> {
         self.connect.config = Some(cfg);
         self
     }
+}
+
+fn merge_client_config(config: Option<ClientConfig>, handshake: HandshakeMode) -> ClientConfig {
+    let mut cfg = config.unwrap_or_default();
+    cfg.handshake = handshake;
+    cfg
 }
 
 impl<H, ST, SC, SCodec, CCodec> Node<ServeConfig<H, ST, SCodec>, ConnectConfig<SC, CCodec>>
@@ -239,6 +327,8 @@ where
             self.serve.transport,
             self.serve.handler,
             self.serve.publish_as,
+            self.serve.handshake,
+            self.serve.connection_mode,
             self.kv.clone(),
             self.threads,
         )
@@ -249,7 +339,7 @@ where
 
         info!("Connecting client");
         let client = Client::<CCodec, CCodec::Dest, SC::Rx>::connect(
-            self.connect.config.unwrap_or_default(),
+            merge_client_config(self.connect.config, self.connect.handshake),
             self.connect.transport,
             topology,
         )
@@ -281,6 +371,8 @@ where
             self.serve.transport,
             self.serve.handler,
             self.serve.publish_as,
+            self.serve.handshake,
+            self.serve.connection_mode,
             self.kv,
             self.threads,
         )
@@ -314,7 +406,7 @@ where
         .await?;
 
         let client = Client::<Codec, Codec::Dest, T::Rx>::connect(
-            self.connect.config.unwrap_or_default(),
+            merge_client_config(self.connect.config, self.connect.handshake),
             self.connect.transport,
             topology,
         )
@@ -333,6 +425,8 @@ async fn start_server<H, T, Codec, P>(
     transport: T,
     handler: H,
     publish_as: Option<String>,
+    handshake: HandshakeMode,
+    connection_mode: ConnectionMode,
     kv: Arc<dyn KvStore>,
     num_threads: usize,
 ) -> anyhow::Result<(Topology, Option<ServiceRegistration>)>
@@ -350,11 +444,17 @@ where
 
     let srv_reg = registry.clone();
     compio::runtime::spawn(async move {
-        setup()
+        let builder = setup()
             .with_transport(transport)
             .with_registry(srv_reg)
+            .with_handshake(handshake)
             .threads(num_threads)
-            .service::<_, Codec>(handler)
+            .service::<_, Codec>(handler);
+        let builder = match connection_mode {
+            ConnectionMode::OneToOne => builder.one_to_one(),
+            ConnectionMode::OneToMany => builder.one_to_many(),
+        };
+        builder
             .run()
             .await
             .expect("Server error");

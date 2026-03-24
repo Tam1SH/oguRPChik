@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use crate::codecs::base::{BufferAllocator, Envelope, MessageCodec, ReleasableBuf};
 use crate::high::service_handler::ServiceHandler;
+use crate::low::handshake::{HandshakeMode, authenticate_client};
 use crate::low::main_loop::run_session;
 use crate::transport::base::{MessageSink, MessageSource, Transport};
 use anyhow::anyhow;
@@ -13,12 +14,14 @@ use local_sync::oneshot;
 #[derive(Clone, Debug)]
 pub struct ClientConfig {
     pub timeout_seconds: u64,
+    pub handshake: HandshakeMode,
 }
 
 impl Default for ClientConfig {
     fn default() -> Self {
         Self {
             timeout_seconds: 10,
+            handshake: HandshakeMode::Disabled,
         }
     }
 }
@@ -70,7 +73,8 @@ where
         config: ClientConfig,
         tx_allocator: TxA,
     ) -> anyhow::Result<Self> {
-        let (sink, source) = transport.decompose()?;
+        let (sink, mut source) = transport.decompose()?;
+        authenticate_client(&sink, &mut source, &tx_allocator, &config.handshake).await?;
 
         let pending = Rc::new(RefCell::new(FxHashMap::default()));
         let p_clone = pending.clone();

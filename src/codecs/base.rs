@@ -38,6 +38,7 @@ pub trait OwnedBuf: BorrowedBuf + Clone {
     fn as_ptr(&self) -> *const u8;
     fn as_mut_ptr(&mut self) -> *mut u8;
     fn clear(&mut self);
+    fn write_from_slice(&mut self, bytes: &[u8]);
 }
 
 pub trait HasAllocator: OwnedBuf {

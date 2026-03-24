@@ -63,6 +63,22 @@ mod tests {
         }};
     }
 
+    macro_rules! rpc_call_hmac {
+        ($transport:expr, $protocol:ty, $handler:expr, $request:expr, $secret:expr) => {{
+            let transport = $transport;
+
+            let (client, _guard) = Node::new()?
+                .serve::<$protocol, _, _>(transport.clone(), $handler.clone())
+                .connect::<$protocol, _>(transport)
+                .auth_hmac($secret)
+                .start()
+                .await
+                .expect("Node start failed");
+
+            client.call($request).await.expect("Call failed")
+        }};
+    }
+
     #[compio::test]
     async fn test_rpc_tcp() -> anyhow::Result<()> {
         let transport = TcpTransport::new("127.0.0.1".to_string());
@@ -102,6 +118,109 @@ mod tests {
         let res = rpc_call!(transport, BitcodeCodec<Request, Response>, EchoHandler, Request::Ping);
 
         assert_eq!(*res.deref(), Response::Pong);
+        Ok(())
+    }
+
+    #[compio::test]
+    async fn test_rpc_tcp_hmac_handshake() -> anyhow::Result<()> {
+        let transport = TcpTransport::new("127.0.0.1".to_string());
+
+        let res = rpc_call_hmac!(
+            transport,
+            RkyvCodec<Request, Response>,
+            EchoHandler,
+            Request::Ping,
+            b"test-secret-tcp".to_vec()
+        );
+
+        assert_eq!(**res.deref(), ArchivedResponse::Pong);
+        Ok(())
+    }
+
+    #[compio::test]
+    async fn test_rpc_shm_hmac_handshake() -> anyhow::Result<()> {
+        let service_base_name = format!("test_shm_hmac_{}", std::process::id());
+        let transport = ShmTransport::new(&service_base_name);
+
+        let res = rpc_call_hmac!(
+            transport,
+            BitcodeCodec<Request, Response>,
+            EchoHandler,
+            Request::Ping,
+            b"test-secret-shm".to_vec()
+        );
+
+        assert_eq!(*res.deref(), Response::Pong);
+        Ok(())
+    }
+
+    #[compio::test]
+    async fn test_rpc_tcp_hmac_rejects_wrong_secret() -> anyhow::Result<()> {
+        let service_name = format!("test-auth-{}", std::process::id());
+        let transport = TcpTransport::new("127.0.0.1".to_string());
+
+        let _guard = Node::new()?
+            .serve::<RkyvCodec<Request, Response>, _, _>(transport.clone(), EchoHandler)
+            .publish(&service_name)
+            .auth_hmac(b"server-secret".to_vec())
+            .start()
+            .await?;
+
+        let err = Node::new()?
+            .connect::<RkyvCodec<Request, Response>, _>(transport)
+            .wait_for(&service_name)
+            .auth_hmac(b"client-secret".to_vec())
+            .start()
+            .await
+            .err()
+            .expect("client should fail handshake");
+
+        assert!(
+            err.to_string().contains("Handshake rejected")
+                || err.to_string().contains("Invalid handshake HMAC"),
+            "unexpected error: {err}"
+        );
+        Ok(())
+    }
+
+    #[compio::test]
+    async fn test_rpc_tcp_one_to_one_rejects_second_client() -> anyhow::Result<()> {
+        let service_name = format!("test-one-to-one-{}", std::process::id());
+        let transport = TcpTransport::new("127.0.0.1".to_string());
+        let secret = b"one-to-one-secret".to_vec();
+
+        let _guard = Node::new()?
+            .serve::<RkyvCodec<Request, Response>, _, _>(transport.clone(), EchoHandler)
+            .publish(&service_name)
+            .auth_hmac(secret.clone())
+            .one_to_one()
+            .start()
+            .await?;
+
+        let first_client = Node::new()?
+            .connect::<RkyvCodec<Request, Response>, _>(transport.clone())
+            .wait_for(&service_name)
+            .auth_hmac(secret.clone())
+            .start()
+            .await?;
+
+        let first_res = first_client.call(Request::Ping).await?;
+        assert_eq!(**first_res.deref(), ArchivedResponse::Pong);
+
+        let err = Node::new()?
+            .connect::<RkyvCodec<Request, Response>, _>(transport)
+            .wait_for(&service_name)
+            .auth_hmac(secret)
+            .start()
+            .await
+            .err()
+            .expect("second client should be rejected");
+
+        assert!(
+            err.to_string().contains("one-to-one")
+                || err.to_string().contains("Handshake rejected"),
+            "unexpected error: {err}"
+        );
         Ok(())
     }
 }

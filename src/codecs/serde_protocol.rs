@@ -94,6 +94,11 @@ impl OwnedBuf for VecBuf {
     fn clear(&mut self) {
         self.0.clear()
     }
+
+    fn write_from_slice(&mut self, bytes: &[u8]) {
+        self.0.clear();
+        self.0.extend_from_slice(bytes);
+    }
 }
 
 impl ReleasableBuf for VecBuf {}

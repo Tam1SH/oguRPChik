@@ -162,6 +162,11 @@ impl OwnedBuf for AlignedBuffer {
     fn clear(&mut self) {
         Self::clear(self);
     }
+
+    fn write_from_slice(&mut self, bytes: &[u8]) {
+        self.0.clear();
+        self.0.extend_from_slice(bytes);
+    }
 }
 
 impl ReleasableBuf for AlignedBuffer {}

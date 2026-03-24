@@ -1,6 +1,9 @@
 use std::cell::RefCell;
 use crate::codecs::base::BufferAllocator;
 use crate::high::service_handler::ServiceHandler;
+use crate::low::handshake::{
+    ConnectionGate, ConnectionLease, HandshakeMode, authenticate_server, reject_connection,
+};
 use crate::low::main_loop::{SessionConfig, run_session};
 use crate::low::runtime;
 use crate::transport::base::{
@@ -26,6 +29,8 @@ impl<C: SessionConfig, H: ServiceHandler<C::Codec>> ServerWorker<C, H> {
         handler: H,
         registry: Option<Arc<dyn TopologyRegistry>>,
         tx_allocator: C::TxAlloc,
+        connection_gate: ConnectionGate,
+        handshake: HandshakeMode,
     ) -> Result<()>
     where
         B: TransportPerWorkerBuilder<Sink, Source>,
@@ -51,7 +56,7 @@ impl<C: SessionConfig, H: ServiceHandler<C::Codec>> ServerWorker<C, H> {
                         info!("Accepted new connection");
                         let h = handler.clone();
 
-                        let (sink, source) = match transport.decompose() {
+                        let (sink, mut source) = match transport.decompose() {
                             Ok(pair) => pair,
                             Err(e) => {
                                 error!(core_id, error = %e, "Transport decompose error");
@@ -60,7 +65,35 @@ impl<C: SessionConfig, H: ServiceHandler<C::Codec>> ServerWorker<C, H> {
                             }
                         };
 
+                        let lease = match connection_gate.try_acquire() {
+                            Some(lease) => lease,
+                            None => {
+                                let _ = reject_connection(
+                                    &sink,
+                                    &tx_allocator,
+                                    "Connection rejected: server is in one-to-one mode",
+                                )
+                                .await;
+                                info!(core_id, "Rejected connection due to one-to-one mode");
+                                continue;
+                            }
+                        };
+
+                        if let Err(e) = authenticate_server(
+                            &sink,
+                            &mut source,
+                            &tx_allocator,
+                            &handshake,
+                        )
+                        .await
+                        {
+                            error!(core_id, error = %e, "Server handshake failed");
+                            drop(lease);
+                            continue;
+                        }
+
                         compio::runtime::spawn(async move {
+                            let _lease: ConnectionLease = lease;
                             info!("run_session task started");
                             let pending = Rc::new(RefCell::new(FxHashMap::default()));
                             run_session::<C, _, _, _>(h, sink, source, pending, alloc).await;

@@ -8,6 +8,7 @@ use crate::codecs::base::{
     BorrowedBuf, BufferAllocator, HasAllocator, MessageCodec, OwnedBuf, ReleasableBuf,
 };
 use crate::high::service_handler::ServiceHandler;
+use crate::low::handshake::{ConnectionGate, ConnectionMode, HandshakeMode};
 use crate::low::runtime;
 use crate::low::server_worker::ServerWorker;
 use crate::transport::base::pool_config::PoolConfig;
@@ -26,6 +27,8 @@ pub struct ServerBuilder<H, C, T, Si, So, RxPayload> {
     handler: H,
     transport: Option<T>,
     registry: Option<Arc<dyn TopologyRegistry>>,
+    handshake: HandshakeMode,
+    connection_mode: ConnectionMode,
     _phantom: PhantomData<(C, Si, So, RxPayload)>,
 }
 
@@ -35,6 +38,8 @@ pub fn setup() -> ServerBuilder<NoHandler, NoCodec, NoTransport, NoSink, NoSourc
         handler: NoHandler,
         transport: None,
         registry: None,
+        handshake: HandshakeMode::Disabled,
+        connection_mode: ConnectionMode::OneToMany,
         _phantom: PhantomData,
     }
 }
@@ -55,6 +60,21 @@ impl<H, C, T, Si, So, RxPayload> ServerBuilder<H, C, T, Si, So, RxPayload> {
         self
     }
 
+    pub fn with_handshake(mut self, handshake: HandshakeMode) -> Self {
+        self.handshake = handshake;
+        self
+    }
+
+    pub fn one_to_one(mut self) -> Self {
+        self.connection_mode = ConnectionMode::OneToOne;
+        self
+    }
+
+    pub fn one_to_many(mut self) -> Self {
+        self.connection_mode = ConnectionMode::OneToMany;
+        self
+    }
+
     pub fn service<NewH, NewC>(
         self,
         handler: NewH,
@@ -69,6 +89,8 @@ impl<H, C, T, Si, So, RxPayload> ServerBuilder<H, C, T, Si, So, RxPayload> {
             handler,
             registry: self.registry,
             transport: self.transport,
+            handshake: self.handshake,
+            connection_mode: self.connection_mode,
             _phantom: PhantomData,
         }
     }
@@ -89,6 +111,8 @@ impl<H, C, T, Si, So, RxPayload> ServerBuilder<H, C, T, Si, So, RxPayload> {
             handler: self.handler,
             registry: self.registry,
             transport: Some(transport),
+            handshake: self.handshake,
+            connection_mode: self.connection_mode,
             _phantom: PhantomData,
         }
     }
@@ -128,6 +152,7 @@ where
         );
 
         type Alloc<C> = <<C as MessageCodec>::Dest as HasAllocator>::Alloc;
+        let connection_gate = ConnectionGate::new(self.connection_mode);
 
         for core_id in 0..self.cores {
             let h = self.handler.clone();
@@ -140,6 +165,8 @@ where
                 h,
                 Some(registry.clone()),
                 allocator,
+                connection_gate.clone(),
+                self.handshake.clone(),
             )
             .await
             .with_context(|| format!("Failed to spawn worker on core {}", core_id))?;

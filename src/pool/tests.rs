@@ -35,6 +35,17 @@ mod pool_convergence_tests {
         fn clear(&mut self) {
             self.used_len = 0;
         }
+
+        fn write_from_slice(&mut self, bytes: &[u8]) {
+            assert!(
+                bytes.len() <= self.capacity(),
+                "write overflow: {} > {}",
+                bytes.len(),
+                self.capacity()
+            );
+            self.data[..bytes.len()].copy_from_slice(bytes);
+            self.used_len = bytes.len();
+        }
     }
 
     impl FakeBuf {

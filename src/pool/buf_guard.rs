@@ -34,6 +34,10 @@ impl<B: OwnedBuf, A: BufferAllocator<Payload = B>> OwnedBuf for BufGuard<B, A> {
     fn clear(&mut self) {
         unsafe { self.buf.as_mut().unwrap_unchecked().clear() }
     }
+
+    fn write_from_slice(&mut self, bytes: &[u8]) {
+        unsafe { self.buf.as_mut().unwrap_unchecked().write_from_slice(bytes) }
+    }
 }
 impl<B, A> AsRef<[u8]> for BufGuard<B, A>
 where
