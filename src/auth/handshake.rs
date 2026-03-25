@@ -1,9 +1,12 @@
+use crate::auth::signed_process;
 use crate::codecs::base::{BufferAllocator, OwnedBuf};
 use crate::transport::base::{MessageSink, MessageSource};
 use anyhow::{Context, bail};
+use binrw::{BinRead, BinReaderExt, BinWrite, BinWriterExt};
 use compio::time::timeout;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
+use std::io::Cursor;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -49,12 +52,45 @@ impl AckStatus {
 
 type HmacSha256 = Hmac<Sha256>;
 
+#[derive(BinRead, BinWrite)]
+#[brw(little)]
+struct HelloPacket {
+    tag: u8,
+    version: u16,
+    scheme: u8,
+    nonce_len: u16,
+    #[br(count = nonce_len)]
+    nonce: Vec<u8>,
+}
+
+#[derive(BinRead, BinWrite)]
+#[brw(little)]
+struct ClientAuthPacket {
+    tag: u8,
+    version: u16,
+    scheme: u8,
+    proof_len: u16,
+    #[br(count = proof_len)]
+    proof: Vec<u8>,
+}
+
+#[derive(BinRead, BinWrite)]
+#[brw(little)]
+struct AckPacket {
+    tag: u8,
+    status: u8,
+    reason_len: u16,
+    #[br(count = reason_len)]
+    reason: Vec<u8>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub enum HandshakeMode {
     #[default]
     Disabled,
     VersionOnly,
     HmacSha256 { secret: Arc<[u8]> },
+    SignedProcess { public_key: Arc<[u8]> },
 }
 
 impl HandshakeMode {
@@ -68,17 +104,17 @@ impl HandshakeMode {
         }
     }
 
+    pub fn signed_process(public_key: impl Into<Vec<u8>>) -> Self {
+        Self::SignedProcess {
+            public_key: Arc::<[u8]>::from(public_key.into()),
+        }
+    }
+
     fn scheme_id(&self) -> u8 {
         match self {
             Self::Disabled | Self::VersionOnly => 0,
             Self::HmacSha256 { .. } => 1,
-        }
-    }
-
-    fn secret(&self) -> Option<&[u8]> {
-        match self {
-            Self::HmacSha256 { secret } => Some(secret),
-            _ => None,
+            Self::SignedProcess { .. } => 2,
         }
     }
 
@@ -120,12 +156,7 @@ impl ConnectionGate {
             }),
             ConnectionMode::OneToOne => self
                 .active
-                .compare_exchange(
-                    false,
-                    true,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                 .ok()
                 .map(|_| ConnectionLease {
                     active: self.active.clone(),
@@ -175,8 +206,8 @@ where
         source,
         HandshakeConfig::STEP_TIMEOUT * HandshakeConfig::RETRY_ATTEMPTS as u32,
     )
-        .await
-        .context("missing server handshake hello")?;
+    .await
+    .context("missing server handshake hello")?;
     if hello.first().copied() == Some(WireTag::ServerAck.byte()) {
         return decode_ack(&hello);
     }
@@ -198,9 +229,12 @@ where
         );
     }
 
-    let proof = match mode.secret() {
-        Some(secret) => compute_hmac(secret, &nonce),
-        None => Vec::new(),
+    let proof = match mode {
+        HandshakeMode::HmacSha256 { secret } => compute_hmac(secret, &nonce),
+        HandshakeMode::SignedProcess { .. } => {
+            signed_process::encode_auth_payload(std::process::id())
+        }
+        _ => Vec::new(),
     };
 
     let auth = encode_client_auth(HANDSHAKE_VERSION, scheme, &proof);
@@ -210,8 +244,8 @@ where
         source,
         HandshakeConfig::STEP_TIMEOUT * HandshakeConfig::RETRY_ATTEMPTS as u32,
     )
-        .await
-        .context("missing server handshake ack")?;
+    .await
+    .context("missing server handshake ack")?;
     decode_ack(&ack)
 }
 
@@ -231,7 +265,8 @@ where
     }
 
     let mut nonce = [0u8; HandshakeConfig::NONCE_LEN];
-    getrandom::fill(&mut nonce).map_err(|e| anyhow::anyhow!("failed to generate handshake nonce: {e}"))?;
+    getrandom::fill(&mut nonce)
+        .map_err(|e| anyhow::anyhow!("failed to generate handshake nonce: {e}"))?;
 
     let hello = encode_hello(HANDSHAKE_VERSION, mode.scheme_id(), &nonce);
     let auth = {
@@ -268,15 +303,28 @@ where
         bail!(reason);
     }
 
-    if let Some(secret) = mode.secret() {
-        let expected = compute_hmac(secret, &nonce);
-        if proof != expected {
-            send_reject(sink, allocator, "Invalid handshake HMAC").await?;
-            bail!("Invalid handshake HMAC");
+    match mode {
+        HandshakeMode::HmacSha256 { secret } => {
+            let expected = compute_hmac(secret, &nonce);
+            if proof != expected {
+                send_reject(sink, allocator, "Invalid handshake HMAC").await?;
+                bail!("Invalid handshake HMAC");
+            }
         }
-    } else if !proof.is_empty() {
-        send_reject(sink, allocator, "Unexpected auth proof").await?;
-        bail!("Unexpected auth proof");
+        HandshakeMode::SignedProcess { public_key } => {
+            let pid = signed_process::decode_auth_payload(&proof)?;
+            if let Err(e) =
+                signed_process::verify_process(pid, public_key).context("signed-process verification failed")
+            {
+                send_reject(sink, allocator, &e.to_string()).await?;
+                return Err(e);
+            }
+        }
+        _ if !proof.is_empty() => {
+            send_reject(sink, allocator, "Unexpected auth proof").await?;
+            bail!("Unexpected auth proof");
+        }
+        _ => {}
     }
 
     send_packet(sink, allocator, &encode_ack_ok()).await?;
@@ -321,7 +369,10 @@ where
     source.recv().await.map(|payload| payload.as_ref().to_vec())
 }
 
-async fn recv_packet_with_timeout<Source>(source: &mut Source, duration: Duration) -> Option<Vec<u8>>
+async fn recv_packet_with_timeout<Source>(
+    source: &mut Source,
+    duration: Duration,
+) -> Option<Vec<u8>>
 where
     Source: MessageSource,
 {
@@ -337,77 +388,92 @@ fn compute_hmac(secret: &[u8], nonce: &[u8]) -> Vec<u8> {
 }
 
 fn encode_hello(version: u16, scheme: u8, nonce: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(8 + nonce.len());
-    out.push(WireTag::Hello.byte());
-    out.extend_from_slice(&version.to_le_bytes());
-    out.push(scheme);
-    out.extend_from_slice(&(nonce.len() as u16).to_le_bytes());
-    out.extend_from_slice(nonce);
-    out
+    write_packet(&HelloPacket {
+        tag: WireTag::Hello.byte(),
+        version,
+        scheme,
+        nonce_len: nonce.len() as u16,
+        nonce: nonce.to_vec(),
+    })
 }
 
 fn decode_hello(bytes: &[u8]) -> anyhow::Result<(u16, u8, Vec<u8>)> {
-    if bytes.len() < 6 || bytes[0] != WireTag::Hello.byte() {
+    let packet: HelloPacket = read_packet(bytes)?;
+    if packet.tag != WireTag::Hello.byte() {
         bail!("Invalid hello packet");
     }
-    let version = u16::from_le_bytes([bytes[1], bytes[2]]);
-    let scheme = bytes[3];
-    let nonce_len = u16::from_le_bytes([bytes[4], bytes[5]]) as usize;
-    if bytes.len() != 6 + nonce_len {
-        bail!("Malformed hello packet");
-    }
-    Ok((version, scheme, bytes[6..].to_vec()))
+    Ok((packet.version, packet.scheme, packet.nonce))
 }
 
 fn encode_client_auth(version: u16, scheme: u8, proof: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(8 + proof.len());
-    out.push(WireTag::ClientAuth.byte());
-    out.extend_from_slice(&version.to_le_bytes());
-    out.push(scheme);
-    out.extend_from_slice(&(proof.len() as u16).to_le_bytes());
-    out.extend_from_slice(proof);
-    out
+    write_packet(&ClientAuthPacket {
+        tag: WireTag::ClientAuth.byte(),
+        version,
+        scheme,
+        proof_len: proof.len() as u16,
+        proof: proof.to_vec(),
+    })
 }
 
 fn decode_client_auth(bytes: &[u8]) -> anyhow::Result<(u16, u8, Vec<u8>)> {
-    if bytes.len() < 6 || bytes[0] != WireTag::ClientAuth.byte() {
+    let packet: ClientAuthPacket = read_packet(bytes)?;
+    if packet.tag != WireTag::ClientAuth.byte() {
         bail!("Invalid client auth packet");
     }
-    let version = u16::from_le_bytes([bytes[1], bytes[2]]);
-    let scheme = bytes[3];
-    let proof_len = u16::from_le_bytes([bytes[4], bytes[5]]) as usize;
-    if bytes.len() != 6 + proof_len {
-        bail!("Malformed client auth packet");
-    }
-    Ok((version, scheme, bytes[6..].to_vec()))
+    Ok((packet.version, packet.scheme, packet.proof))
 }
 
 fn encode_ack_ok() -> Vec<u8> {
-    vec![WireTag::ServerAck.byte(), AckStatus::Ok.byte(), 0, 0]
+    write_packet(&AckPacket {
+        tag: WireTag::ServerAck.byte(),
+        status: AckStatus::Ok.byte(),
+        reason_len: 0,
+        reason: Vec::new(),
+    })
 }
 
 fn encode_ack_err(reason: &str) -> Vec<u8> {
-    let reason_bytes = reason.as_bytes();
-    let mut out = Vec::with_capacity(4 + reason_bytes.len());
-    out.push(WireTag::ServerAck.byte());
-    out.push(AckStatus::Rejected.byte());
-    out.extend_from_slice(&(reason_bytes.len() as u16).to_le_bytes());
-    out.extend_from_slice(reason_bytes);
-    out
+    write_packet(&AckPacket {
+        tag: WireTag::ServerAck.byte(),
+        status: AckStatus::Rejected.byte(),
+        reason_len: reason.len() as u16,
+        reason: reason.as_bytes().to_vec(),
+    })
 }
 
 fn decode_ack(bytes: &[u8]) -> anyhow::Result<()> {
-    if bytes.len() < 4 || bytes[0] != WireTag::ServerAck.byte() {
+    let packet: AckPacket = read_packet(bytes)?;
+    if packet.tag != WireTag::ServerAck.byte() {
         bail!("Invalid handshake ack packet");
     }
-    let status = bytes[1];
-    let reason_len = u16::from_le_bytes([bytes[2], bytes[3]]) as usize;
-    if bytes.len() != 4 + reason_len {
-        bail!("Malformed handshake ack packet");
-    }
-    if status == AckStatus::Ok.byte() {
+    if packet.status == AckStatus::Ok.byte() {
         return Ok(());
     }
-    let reason = String::from_utf8_lossy(&bytes[4..]).into_owned();
+    let reason = String::from_utf8_lossy(&packet.reason).into_owned();
     bail!("Handshake rejected: {}", reason);
+}
+
+fn write_packet<T>(packet: &T) -> Vec<u8>
+where
+    T: BinWrite,
+    for<'a> <T as BinWrite>::Args<'a>: Default,
+{
+    let mut cursor = Cursor::new(Vec::new());
+    cursor
+        .write_le(packet)
+        .expect("handshake packet serialization should be infallible");
+    cursor.into_inner()
+}
+
+fn read_packet<T>(bytes: &[u8]) -> anyhow::Result<T>
+where
+    T: BinRead,
+    for<'a> <T as BinRead>::Args<'a>: Default,
+{
+    let mut cursor = Cursor::new(bytes);
+    let packet = cursor.read_le().context("failed to decode handshake packet")?;
+    if cursor.position() != bytes.len() as u64 {
+        bail!("Malformed handshake packet");
+    }
+    Ok(packet)
 }

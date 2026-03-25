@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use crate::codecs::base::{BufferAllocator, Envelope, MessageCodec, ReleasableBuf};
 use crate::high::service_handler::ServiceHandler;
-use crate::low::handshake::{HandshakeMode, authenticate_client};
+use crate::auth::handshake::{HandshakeMode, authenticate_client};
 use crate::low::main_loop::run_session;
 use crate::transport::base::{MessageSink, MessageSource, Transport};
 use anyhow::anyhow;

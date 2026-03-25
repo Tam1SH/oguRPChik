@@ -8,7 +8,7 @@ use crate::codecs::base::{
     BorrowedBuf, BufferAllocator, HasAllocator, MessageCodec, OwnedBuf, ReleasableBuf,
 };
 use crate::high::service_handler::ServiceHandler;
-use crate::low::handshake::{ConnectionGate, ConnectionMode, HandshakeMode};
+use crate::auth::handshake::{ConnectionGate, ConnectionMode, HandshakeMode};
 use crate::low::runtime;
 use crate::low::server_worker::ServerWorker;
 use crate::transport::base::pool_config::PoolConfig;

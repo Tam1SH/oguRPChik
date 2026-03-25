@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use crate::codecs::base::BufferAllocator;
 use crate::high::service_handler::ServiceHandler;
-use crate::low::handshake::{
+use crate::auth::handshake::{
     ConnectionGate, ConnectionLease, HandshakeMode, authenticate_server, reject_connection,
 };
 use crate::low::main_loop::{SessionConfig, run_session};

@@ -1,4 +1,5 @@
 # oguRPChik 🥒
+
 <div align="center">
   <img src="/Unusual-Bananas-0.png" width="350" alt="Ogurpchik Logo">
   <br>
@@ -12,37 +13,46 @@
 
 ## 🧐 Motivation
 
-This crate is actively used in my main project for duplex communication (Host <-> VM, Host <-> Plugins).
+This crate is actively used in my main project for duplex communication (`Host <-> VM`, `Host <-> Plugins`).
 
-However, let's be honest: I didn't extract it into a separate library for "better modularity" or "architectural purity". I did it because the pun **Ogurpchik** (*Ogurets* + *RPC*) popped into my head, and I simply needed a public repository to make the joke official.
+However, let's be honest: I did not extract it into a separate library for "better modularity" or "architectural purity". I did it because the pun **Ogurpchik** (`Ogurets` + `RPC`) popped into my head, and I needed a public repository to make the joke official.
 
 ## 🚀 WHAT THIS PICKLE CAN DO (for very smol ones)
 
-- **Transport Agnostic**: Works over TCP, VSOCK, SHM, or any other communication backend you choose to implement.
-- **Message Flexible**: Supports both data-owning (Serde) and zero-copy view formats (rkyv).
-- **Service Discovery**: Windows registry-backed discovery — no broker process, no handshakes, no magic.
+- **Transport Agnostic**: Works over TCP, VSOCK, SHM, named pipes, or any other backend you choose to implement.
+- **Message Flexible**: Supports both data-owning (`serde`-style) and zero-copy view formats (`rkyv`).
+- **Service Discovery**: Windows registry-backed discovery with no broker process and no extra service.
+- **Handshake Modes**: Disabled by default, with optional version-only, HMAC, and Windows-only signed-process auth.
+- **Connection Policy**: Servers can run as `one-to-one` or `one-to-many`.
 
 ## 📦 Transports
 
 | Transport | Description |
 |-----------|-------------|
-| `TcpTransport` | TCP sockets, works everywhere |
+| `TcpTransport` | TCP sockets |
 | `VsockTransport` | Hyper-V / Linux VM sockets |
 | `ShmTransport` | Shared memory IPC |
+| `NamedPipeTransport` | Windows named pipes |
 
 ## 📖 Usage
 
 ### Define your protocol
 
 ```rust
-use rkyv::{Archive, Serialize, Deserialize};
 use ogurpchik::codecs::rkyv_protocol::RkyvCodec;
+use rkyv::{Archive, Deserialize, Serialize};
 
 #[derive(Archive, Serialize, Deserialize)]
-pub enum Request { Ping, Echo(String) }
+pub enum Request {
+    Ping,
+    Echo(String),
+}
 
 #[derive(Archive, Serialize, Deserialize)]
-pub enum Response { Pong, Echo(String) }
+pub enum Response {
+    Pong,
+    Echo(String),
+}
 
 pub type MyCodec = RkyvCodec<Request, Response>;
 ```
@@ -50,7 +60,7 @@ pub type MyCodec = RkyvCodec<Request, Response>;
 ### Implement a handler
 
 ```rust
-use ogurpchik::service_handler::ServiceHandler;
+use ogurpchik::high::service_handler::ServiceHandler;
 
 #[derive(Clone)]
 struct MyHandler;
@@ -68,12 +78,12 @@ impl ServiceHandler<MyCodec> for MyHandler {
 ### Single process (loopback)
 
 ```rust
-use ogurpchik::node::Node;
+use ogurpchik::high::node::Node;
 use ogurpchik::transport::stream::adapters::tcp::TcpTransport;
 
 #[compio::main]
 async fn main() -> anyhow::Result<()> {
-    let (client, _guard) = Node::new()
+    let (client, _guard) = Node::new()?
         .serve::<MyCodec, _, _>(TcpTransport::new("127.0.0.1:1337"), MyHandler)
         .connect::<MyCodec, _>(TcpTransport::new("127.0.0.1:1337"))
         .start()
@@ -84,24 +94,44 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-### Host ↔ VM (Hyper-V / WSL2)
+### Handshake and connection policy
 
-The host registers its VM address in the Windows registry on startup.
-Both sides discover each other without any prior coordination.
+`Node` starts with handshake disabled and `one-to-many` server behavior.
+
+```rust
+use ogurpchik::high::node::Node;
+
+let node = Node::new()?
+    .auth_hmac("dev-secret")
+    .one_to_one();
+```
+
+Available helpers:
+
+- `auth_hmac(secret)` - transport-agnostic shared-secret authentication
+- `handshake_version_only()` - protocol/version bootstrap without auth
+- `auth_signed_process(public_key)` - Windows-only PID plus detached-signature verification
+- `auth_disabled()` - explicitly disable the handshake
+- `one_to_one()` / `one_to_many()` - server-side connection policy
+
+`auth_signed_process(public_key)` expects the connecting process image to have a sibling detached signature file such as `gui.exe.sig`. The server validates the image bytes with the provided Ed25519 public key. The key may be raw 32-byte material or base64 text.
+
+### Host <-> VM (Hyper-V / WSL2)
+
+The host registers its VM address in the Windows registry on startup. Both sides discover each other without any prior coordination.
 
 **Host side (Windows):**
 
 ```rust
-use ogurpchik::discovery::{register_vm_default, services};
-use ogurpchik::node::Node;
-use ogurpchik::transport::stream::adapters::vsock::{VsockTransport, VsockAddr};
+use ogurpchik::discovery::register_vm_default;
+use ogurpchik::high::node::Node;
+use ogurpchik::transport::stream::adapters::vsock::{VsockAddr, VsockTransport};
 
 #[compio::main]
 async fn main() -> anyhow::Result<()> {
-    // writes guest VMID to registry so the guest can find itself
     register_vm_default("WSL")?;
 
-    let (guest_client, _guard) = Node::new()
+    let (guest_client, _guard) = Node::new()?
         .serve::<AgentCodec, _, _>(VsockTransport::server(VsockAddr::SelfManaged, 5000), HostHandler {})
         .publish("HOST")
         .connect::<HostCodec, _>(VsockTransport::client(VsockAddr::SelfManaged))
@@ -118,7 +148,7 @@ async fn main() -> anyhow::Result<()> {
 ```rust
 #[compio::main]
 async fn main() -> anyhow::Result<()> {
-    let (host_client, _guard) = Node::new()
+    let (host_client, _guard) = Node::new()?
         .serve::<HostCodec, _, _>(VsockTransport::server(VsockAddr::SelfManaged, 5001), GuestHandler)
         .publish("GUEST")
         .connect::<AgentCodec, _>(VsockTransport::client(2))
@@ -130,16 +160,15 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-Each side publishes itself to the Windows registry and waits for the other to appear.
-`_guard` holds the registry entry alive — dropping it cleans up automatically.
+Each side publishes itself to the Windows registry and waits for the other to appear. `_guard` holds the registry entry alive and dropping it cleans the registration up automatically.
 
-### Serve only (no client)
+### Serve only
 
 ```rust
 #[compio::main]
 async fn main() -> anyhow::Result<()> {
-    let _guard = Node::new()
-        .serve::<MyCodec, _, _>(VsockTransport::server(VsockAddr::SelfManaged, 5000), MyHandler)
+    let _guard = Node::new()?
+        .serve::<MyCodec, _, _>(TcpTransport::new("127.0.0.1:1337"), MyHandler)
         .publish("MY_SERVICE")
         .start()
         .await?;
@@ -148,13 +177,13 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-### Connect only (no server)
+### Connect only
 
 ```rust
 #[compio::main]
 async fn main() -> anyhow::Result<()> {
-    let client = Node::new()
-        .connect::<MyCodec, _>(VsockTransport::client(VsockAddr::Cid(2)))
+    let client = Node::new()?
+        .connect::<MyCodec, _>(TcpTransport::new("127.0.0.1:1337"))
         .wait_for("MY_SERVICE")
         .start()
         .await?;
@@ -163,26 +192,24 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-## 🔍 Service Discovery
+## Service Discovery
 
 Discovery is backed by the Windows registry (`HKCU\Software\Ogurpchik\Services`).
 
-- **Publish**: when a server is ready, its topology is written to the registry under a service name.
-- **Resolve**: clients read the topology by name before connecting.
-- **Watch**: clients block until the key appears — works natively on Windows (`RegNotifyChangeKeyValue`), polled via `reg.exe` on WSL/Linux.
-- **Cleanup**: `ServiceRegistration` guard deletes the registry key on drop.
+- **Publish**: when a server is ready, its topology is written to the registry under a service name
+- **Resolve**: clients read the topology by name before connecting
+- **Watch**: clients block until the key appears; native on Windows, polled via `reg.exe` on WSL/Linux
+- **Cleanup**: `ServiceRegistration` deletes the registry key on drop
 
-```
+```text
 HKCU\Software\Ogurpchik\
   Services\
-    host    →  {"transport_kind":"vsock","codec_kind":"rkyv","map":{"0":"2:5000"}}
-    guest   →  {"transport_kind":"vsock","codec_kind":"rkyv","map":{"0":"550e8400-e29b-41d4-a716-446655440000:5001"}}
+    host  -> {"transport_kind":"vsock","codec_kind":"rkyv","map":{"0":"2:5000"}}
+    guest -> {"transport_kind":"vsock","codec_kind":"rkyv","map":{"0":"550e8400-e29b-41d4-a716-446655440000:5001"}}
   Hosts\
-    WSL     →  "550e8400-e29b-41d4-a716-446655440000"
+    WSL   -> "550e8400-e29b-41d4-a716-446655440000"
 ```
 
 ## License
 
-
 MIT
-

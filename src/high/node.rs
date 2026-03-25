@@ -7,7 +7,7 @@ use crate::high::client::Client;
 use crate::high::server::setup;
 use crate::high::service_handler::ServiceHandler;
 use crate::low::client_per_core::ClientConfig;
-use crate::low::handshake::{ConnectionMode, HandshakeMode};
+use crate::auth::handshake::{ConnectionMode, HandshakeMode};
 use crate::transport::base::TransportBuilder;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -22,6 +22,22 @@ use crate::discovery::Scope;
 /// ## Thread configuration
 ///
 /// Single-threaded by default. Use `.threads(n)` to pin server workers to cores.
+///
+/// ## Connection policy
+///
+/// Server nodes default to `one_to_many`. Use `.one_to_one()` to keep exactly one
+/// active client session at a time.
+///
+/// ## Handshake / auth
+///
+/// Handshake is disabled by default.
+///
+/// Use one of:
+/// - `.handshake_version_only()` for bootstrap/version checks only
+/// - `.auth_hmac(secret)` for shared-secret authentication
+/// - `.auth_signed_process(public_key)` for Windows-only detached-signature
+///   verification of the connecting process image
+/// - `.auth_disabled()` to disable the handshake explicitly
 ///
 /// # Examples
 ///
@@ -190,6 +206,7 @@ where
     S: ConfigureServer,
     C: ConfigureClient,
 {
+    /// Enables shared-secret HMAC authentication for both server and client setup.
     pub fn auth_hmac(mut self, secret: impl Into<Vec<u8>>) -> Self {
         let handshake = HandshakeMode::hmac(secret);
         self.serve.set_server_handshake(handshake.clone());
@@ -197,6 +214,21 @@ where
         self
     }
 
+    /// Enables Windows-only signed-process authentication.
+    ///
+    /// The client sends its PID during bootstrap. The server resolves the process
+    /// image path and verifies a sibling detached signature file (`<image>.sig`)
+    /// using the provided Ed25519 public key.
+    ///
+    /// `public_key` may be raw 32-byte key material or base64 text.
+    pub fn auth_signed_process(mut self, public_key: impl Into<Vec<u8>>) -> Self {
+        let handshake = HandshakeMode::signed_process(public_key);
+        self.serve.set_server_handshake(handshake.clone());
+        self.connect.set_client_handshake(handshake);
+        self
+    }
+
+    /// Enables version-only handshake without an authentication proof.
     pub fn handshake_version_only(mut self) -> Self {
         let handshake = HandshakeMode::version_only();
         self.serve.set_server_handshake(handshake.clone());
@@ -204,6 +236,7 @@ where
         self
     }
 
+    /// Disables the handshake on both sides.
     pub fn auth_disabled(mut self) -> Self {
         self.serve.set_server_handshake(HandshakeMode::Disabled);
         self.connect.set_client_handshake(HandshakeMode::Disabled);
@@ -215,11 +248,13 @@ impl<S, C> Node<S, C>
 where
     S: ConfigureServer,
 {
+    /// Restricts the server to a single active client connection.
     pub fn one_to_one(mut self) -> Self {
         self.serve.set_connection_mode(ConnectionMode::OneToOne);
         self
     }
 
+    /// Allows the server to accept multiple concurrent client connections.
     pub fn one_to_many(mut self) -> Self {
         self.serve.set_connection_mode(ConnectionMode::OneToMany);
         self
