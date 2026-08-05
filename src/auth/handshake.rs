@@ -18,6 +18,7 @@
 use crate::auth::signed_process;
 use crate::error::{HandshakeError, Result, TransportError};
 use crate::net::{Conn, PeerIdentity};
+use binrw::{BinRead, BinReaderExt, BinWrite, BinWriterExt};
 use compio::BufResult;
 use compio::io::{AsyncReadExt, AsyncWriteExt};
 use compio::time::timeout;
@@ -26,6 +27,7 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::cell::Cell;
 use std::fmt;
+use std::io::Cursor;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -340,75 +342,118 @@ async fn read_packet_with_timeout(conn: &mut Conn) -> Result<Vec<u8>, HandshakeE
 
 // --- packet bodies (see module docs for the wire layout) ---
 
+#[derive(BinRead, BinWrite)]
+#[brw(little)]
+struct HelloPacket {
+    tag: u8,
+    version: u16,
+    scheme: u8,
+    nonce_len: u16,
+    #[br(count = nonce_len)]
+    nonce: Vec<u8>,
+}
+
+#[derive(BinRead, BinWrite)]
+#[brw(little)]
+struct ClientAuthPacket {
+    tag: u8,
+    version: u16,
+    scheme: u8,
+    proof_len: u16,
+    #[br(count = proof_len)]
+    proof: Vec<u8>,
+}
+
+#[derive(BinRead, BinWrite)]
+#[brw(little)]
+struct AckPacket {
+    tag: u8,
+    status: u8,
+    reason_len: u16,
+    #[br(count = reason_len)]
+    reason: Vec<u8>,
+}
+
 fn encode_hello(scheme: u8, nonce: &[u8]) -> Vec<u8> {
-    let mut body = Vec::with_capacity(6 + nonce.len());
-    body.push(TAG_HELLO);
-    body.extend_from_slice(&HANDSHAKE_VERSION.to_le_bytes());
-    body.push(scheme);
-    body.extend_from_slice(&(nonce.len() as u16).to_le_bytes());
-    body.extend_from_slice(nonce);
-    body
+    write_body(&HelloPacket {
+        tag: TAG_HELLO,
+        version: HANDSHAKE_VERSION,
+        scheme,
+        nonce_len: nonce.len() as u16,
+        nonce: nonce.to_vec(),
+    })
 }
 
 fn decode_hello(body: &[u8]) -> Result<(u16, u8, Vec<u8>), HandshakeError> {
-    if body.len() < 6 || body[0] != TAG_HELLO {
+    let packet: HelloPacket = read_body(body, "hello")?;
+    if packet.tag != TAG_HELLO {
         return Err(malformed("hello"));
     }
-    let version = u16::from_le_bytes([body[1], body[2]]);
-    let scheme = body[3];
-    let nonce_len = u16::from_le_bytes([body[4], body[5]]) as usize;
-    if body.len() != 6 + nonce_len {
-        return Err(malformed("hello"));
-    }
-    Ok((version, scheme, body[6..].to_vec()))
+    Ok((packet.version, packet.scheme, packet.nonce))
 }
 
 fn encode_client_auth(scheme: u8, proof: &[u8]) -> Vec<u8> {
-    let mut body = Vec::with_capacity(6 + proof.len());
-    body.push(TAG_CLIENT_AUTH);
-    body.extend_from_slice(&HANDSHAKE_VERSION.to_le_bytes());
-    body.push(scheme);
-    body.extend_from_slice(&(proof.len() as u16).to_le_bytes());
-    body.extend_from_slice(proof);
-    body
+    write_body(&ClientAuthPacket {
+        tag: TAG_CLIENT_AUTH,
+        version: HANDSHAKE_VERSION,
+        scheme,
+        proof_len: proof.len() as u16,
+        proof: proof.to_vec(),
+    })
 }
 
 fn decode_client_auth(body: &[u8]) -> Result<(u16, u8, Vec<u8>), HandshakeError> {
-    if body.len() < 6 || body[0] != TAG_CLIENT_AUTH {
+    let packet: ClientAuthPacket = read_body(body, "client auth")?;
+    if packet.tag != TAG_CLIENT_AUTH {
         return Err(malformed("client auth"));
     }
-    let version = u16::from_le_bytes([body[1], body[2]]);
-    let scheme = body[3];
-    let proof_len = u16::from_le_bytes([body[4], body[5]]) as usize;
-    if body.len() != 6 + proof_len {
-        return Err(malformed("client auth"));
-    }
-    Ok((version, scheme, body[6..].to_vec()))
+    Ok((packet.version, packet.scheme, packet.proof))
 }
 
 fn encode_ack(status: u8, reason: &[u8]) -> Vec<u8> {
-    let mut body = Vec::with_capacity(4 + reason.len());
-    body.push(TAG_ACK);
-    body.push(status);
-    body.extend_from_slice(&(reason.len() as u16).to_le_bytes());
-    body.extend_from_slice(reason);
-    body
+    write_body(&AckPacket {
+        tag: TAG_ACK,
+        status,
+        reason_len: reason.len() as u16,
+        reason: reason.to_vec(),
+    })
 }
 
 fn decode_ack(body: &[u8]) -> Result<(), HandshakeError> {
-    if body.len() < 4 || body[0] != TAG_ACK {
+    let packet: AckPacket = read_body(body, "ack")?;
+    if packet.tag != TAG_ACK {
         return Err(malformed("ack"));
     }
-    let status = body[1];
-    let reason_len = u16::from_le_bytes([body[2], body[3]]) as usize;
-    if body.len() != 4 + reason_len {
-        return Err(malformed("ack"));
-    }
-    if status == ACK_OK {
+    if packet.status == ACK_OK {
         return Ok(());
     }
-    let reason = String::from_utf8_lossy(&body[4..]).into_owned();
+    let reason = String::from_utf8_lossy(&packet.reason).into_owned();
     Err(Report::new(HandshakeError::Rejected).attach(reason))
+}
+
+fn write_body<T>(packet: &T) -> Vec<u8>
+where
+    T: BinWrite,
+    for<'a> <T as BinWrite>::Args<'a>: Default,
+{
+    let mut cursor = Cursor::new(Vec::new());
+    cursor
+        .write_le(packet)
+        .expect("handshake packet serialization should be infallible");
+    cursor.into_inner()
+}
+
+fn read_body<T>(body: &[u8], what: &str) -> Result<T, HandshakeError>
+where
+    T: BinRead,
+    for<'a> <T as BinRead>::Args<'a>: Default,
+{
+    let mut cursor = Cursor::new(body);
+    let packet = cursor.read_le().map_err(|_| malformed(what))?;
+    if cursor.position() != body.len() as u64 {
+        return Err(malformed(what));
+    }
+    Ok(packet)
 }
 
 fn malformed(what: &str) -> Report<HandshakeError> {
