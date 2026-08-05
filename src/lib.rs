@@ -1,9 +1,7 @@
 extern crate core;
 
 pub mod auth;
-pub mod codecs;
-pub mod discovery;
-pub mod high;
-pub mod low;
-pub mod pool;
-pub mod transport;
+pub mod endpoint;
+pub mod error;
+pub mod net;
+pub mod rpc;

@@ -1,92 +1,61 @@
 [package]
 name = "ogurpchik"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 authors = ["ignatternyev54@gmail.com"]
 license = "MIT"
-description = "A transport-agnostic RPC framework for stream and memory-based communication. Built with high-performance primitives to deliver medium-performance results."
+description = "Host <-> VM-agent and host <-> plugin RPC over vsock/uds/npipe, with capnp-rpc on top of a compio transport."
 keywords = ["rpc", "windows", "linux", "ipc"]
 
 [dependencies]
-
-compio = { version = "0.18.0", features = ["net", "io-compat", "process", "macros", "time"] }
+compio = { version = "0.18.0", features = ["net", "io-compat", "process", "macros", "time", "fs"] }
 socket2 = "0.6.2"
 
+error-stack = "0.8"
+capnp = "0.27"
+capnp-rpc = "0.27"
 
-anyhow = "1.0.100"
+# Handshake (auth/handshake): binrw packet bodies, HMAC proof, OS randomness.
 binrw = "0.15.0"
-tracing = { version = "0.1.44", features = ["release_max_level_warn"] }
-futures = "0.3.31"
 hmac = "0.12.1"
 sha2 = "0.10.9"
-base64 = "0.22.1"
-tracing-subscriber = "0.3.22"
-bytes = "1.11.1"
-kanal = { version = "0.1.1", features = ["async"] }
-dashmap = "6.1.0"
-affinity = "0.1.2"
-num_cpus = "1.17.0"
-oneshot = "0.1.13"
-smallvec = "1.15.1"
-local-sync = "0.1.1"
-lazy_static = "1.5.0"
-
-rkyv = { version = "0.8.14", features = ["bytecheck", "std"], optional = true }
-serde = { version = "1.0.228", features = ["derive"] }
-bitcode = { version = "0.6.9", features = ["serde"], optional = true }
-rustc-hash = "2.1.1"
-iceoryx2 = { version = "0.8.1", optional = true }
-
-dhat = { version = "0.3", optional = true }
-
-uuid = { version = "1.20.0", features = ["v4", "serde"] }
-serde_json = "1.0.149"
-object-pool = "0.6.0"
-anymap = "0.12.1"
 getrandom = "0.4.2"
-ed25519-dalek = { version = "2.2.0", default-features = false, features = ["std"] }
 
+# Signed-process attestation (auth/signed_process): ed25519 image signatures.
+ed25519-dalek = { version = "2.2.0", default-features = false, features = ["std"] }
+base64 = "0.22.1"
+
+futures = "0.3.31"
+tracing = { version = "0.1.44", features = ["release_max_level_warn"] }
+
+# vsock (net/vsock): VM GUID resolution via vmcompute.dll (JSON output).
+uuid = { version = "1.20.0", features = ["v4", "serde"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+
+[dev-dependencies]
+testschema = { path = "tests/testschema" }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61.3", features = [
     "Win32_Foundation",
-    "Win32_System_Performance",
-    "Win32_NetworkManagement", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis",
-    "Win32_Networking_WinSock", "Win32_System_Threading", "Win32_System_Hypervisor", "Win32_System_Registry"] }
+    "Win32_Networking_WinSock",
+    "Win32_System_Threading",
+    "Win32_System_Hypervisor",
+    "Win32_System_Pipes"] }
 
+# net/vsock/utils.rs loads vmcompute.dll dynamically and falls back to a
+# registry lookup for the WSL VM id — pre-`windows`-crate idioms kept from
+# the original (proven) code.
 winreg = "0.55.0"
 widestring = "1.2.1"
 winapi = { version = "0.3.9", features = ["libloaderapi", "combaseapi", "minwindef", "ntdef"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1.1", features = ["net"] }
+
 [target.'cfg(unix)'.dependencies]
 libc = "1.0.0-alpha.2"
-inotify = "0.11"
-
-[features]
-
-rkyv-codec = ["dep:rkyv"]
-bitcode-codec = ["dep:bitcode"]
-
-shm = ["dep:iceoryx2"]
-stream = []
-
-tcp = ["stream"]
-vsock = ["stream"]
-uds = ["stream"]
-npipe = ["stream", "compio/fs"]
-
-all = [
-    "rkyv-codec",
-    "bitcode-codec",
-    "shm",
-    "tcp",
-    "uds",
-    "vsock",
-    "npipe",
-    "stream"
-]
-
-dhat-heap = ["dep:dhat"]
 
 [profile.release]
 split-debuginfo = "packed"

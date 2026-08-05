@@ -5,30 +5,14 @@ edition     = "2021"
 publish     = false
 
 [dependencies]
-ogurpchik = { path = "../", features = ["all"] }
+ogurpchik = { path = "../" }
+testschema = { path = "../tests/testschema" }
 
-anyhow       = "1"
-bytes        = "1"
-compio       = { version = "0.18.0", features = ["runtime"] }
+compio       = { version = "0.18.0", features = ["net", "io-compat", "macros", "time"] }
+capnp        = "0.27"
 futures      = "0.3"
-tokio        = { version = "1", features = ["rt", "sync"] }
-rkyv = "0.8.15"
-serde = { version = "1.0.228", features = ["derive"] }
-criterion   = { version = "0.5", features = ["html_reports", "async_tokio"] }
-dashmap = "6.1.0"
-oneshot = "0.1.13"
-local-sync = "0.1.1"
-rustc-hash = "2.1.1"
-
-[[bench]]
-name    = "peer_throughput"
-path    = "src/peer_throughput.rs"
-harness = false
-
-[[bench]]
-name    = "peer_latency"
-path    = "src/peer_latency.rs"
-harness = false
+futures-util = "0.3"
+criterion    = { version = "0.5", features = ["html_reports"] }
 
 [[bench]]
 name    = "rpc_latency"
@@ -36,23 +20,8 @@ path    = "src/rpc_latency.rs"
 harness = false
 
 [[bench]]
-name    = "rpc_throughput"
-path    = "src/rpc_throughput.rs"
-harness = false
-
-[[bench]]
-name    = "codec_bench"
-path    = "codec.rs"
-harness = false
-
-[[bench]]
-name    = "session_bench"
-path    = "session.rs"
-harness = false
-
-[[bench]]
-name    = "per_core_bench"
-path    = "src/per_core.rs"
+name    = "bridge_cost"
+path    = "src/bridge_cost.rs"
 harness = false
 
 [profile.release]
