@@ -46,6 +46,12 @@ anymap = "0.12.1"
 getrandom = "0.4.2"
 ed25519-dalek = { version = "2.2.0", default-features = false, features = ["std"] }
 
+# New RPC stack (see plans/sharded-riding-island.md). Coexists with the
+# modules above during the migration; those are deleted wholesale in a later
+# stage, at which point anyhow/rkyv/bitcode/etc. go with them.
+error-stack = "0.8"
+capnp = "0.27"
+
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61.3", features = [
