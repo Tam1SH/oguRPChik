@@ -40,7 +40,6 @@ pub fn get_best_vmid() -> std::io::Result<GUID> {
     Ok(uuid_to_guid(vms[0].id))
 }
 
-//thanks: https://github.com/nbdd0121/wsld/blob/master/server/src/vmcompute.rs
 #[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -62,8 +61,6 @@ fn enumerate_compute_systems(query: &str) -> std::io::Result<Vec<ComputeSystem>>
     use winapi::um::libloaderapi::{FreeLibrary, GetProcAddress, LoadLibraryA};
 
     unsafe {
-        // Load vmcompute.dll and get HcsEnumerateComputeSystems. This cannot yet
-        // be done using `#[link] extern {}` as it is semi-documented API.
         let module = LoadLibraryA(b"vmcompute.dll\0".as_ptr() as _);
         if module.is_null() {
             return Err(std::io::Error::last_os_error());

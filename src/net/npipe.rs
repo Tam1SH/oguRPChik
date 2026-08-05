@@ -1,7 +1,3 @@
-//! Windows named pipes. Not gated behind a Cargo feature — gated by
-//! `#[cfg(windows)]` at the point of use in `conn.rs`/`listener.rs`, since a
-//! named pipe isn't a concept that exists on other platforms at all (unlike
-//! uds, which compio supports on both Windows and Unix).
 
 use crate::net::Splitable;
 use compio::buf::{BufResult, IoBuf, IoBufMut};
@@ -76,10 +72,6 @@ impl Display for NamedPipePath {
     }
 }
 
-/// A named-pipe listener. Unlike a socket listener, a Windows named pipe
-/// server has to create the *next* pipe instance before handing off the one
-/// that just connected, or a client racing to connect between two `accept()`
-/// calls gets `ERROR_FILE_NOT_FOUND` instead of queuing.
 pub struct NamedPipeAcceptor {
     path: NamedPipePath,
     current: Arc<Mutex<NamedPipeServer>>,

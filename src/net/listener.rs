@@ -9,7 +9,6 @@ use std::path::{Path, PathBuf};
 #[cfg(windows)]
 use crate::net::npipe::NamedPipeAcceptor;
 
-/// A bound listener, dispatched at runtime the same way [`Conn`] is.
 pub enum Listener {
     Tcp(TcpListener),
     Uds { listener: UnixListener, path: PathBuf },
@@ -27,9 +26,6 @@ impl Listener {
             .attach(format!("tcp {addr}"))
     }
 
-    /// Binds a Unix domain socket, removing a stale socket file left behind
-    /// by an unclean shutdown first — a fresh `bind()` on an existing path
-    /// otherwise fails with `AddrInUse` even though nothing is listening.
     pub async fn bind_uds(path: &Path) -> Result<Self, Report<TransportError>> {
         let _ = std::fs::remove_file(path);
         UnixListener::bind(path)
@@ -58,9 +54,6 @@ impl Listener {
             .attach(format!("vsock port {port}"))
     }
 
-    /// Binds for same-host vsock dev/test use — see
-    /// [`Conn::connect_vsock_loopback`] for why this isn't just
-    /// `bind_vsock(VsockTarget::Cid(0), port)`.
     pub fn bind_vsock_loopback(port: u32) -> Result<Self, Report<TransportError>> {
         VListener::bind_loopback(port)
             .map(Self::Vsock)
@@ -107,11 +100,6 @@ impl Listener {
 
 impl Drop for Listener {
     fn drop(&mut self) {
-        // Unix domain sockets are filesystem objects; clean up on the way
-        // out so a later bind on the same path doesn't have to deal with a
-        // stale entry (bind_uds() also does this defensively on entry, but
-        // doing it here too keeps a normal shutdown from leaving anything
-        // behind at all).
         if let Self::Uds { path, .. } = self {
             let _ = std::fs::remove_file(path);
         }
@@ -120,11 +108,6 @@ impl Drop for Listener {
 
 #[cfg(test)]
 mod tests {
-    //! Ping-pong through the `Conn`/`Listener` enum itself, per transport —
-    //! distinct from the lower-level stream tests in `vsock::general` and
-    //! `npipe`, which exercise the underlying stream types directly. These
-    //! prove the enum dispatch (and, for uds, the stale-socket cleanup and
-    //! `Endpoint`-free bind/connect split) works end to end.
     use super::*;
     use compio::BufResult;
     use compio::io::{AsyncReadExt, AsyncWriteExt};
@@ -187,8 +170,6 @@ mod tests {
             "ogurpchik-net-test-stale-{}.sock",
             std::process::id()
         ));
-        // Simulate a stale socket left behind by an unclean shutdown: a
-        // regular file at the same path, not an actual bound socket.
         std::fs::write(&path, b"not a socket").expect("write stale file failed");
 
         let _listener = Listener::bind_uds(&path)

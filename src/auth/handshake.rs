@@ -1,19 +1,3 @@
-//! Pre-RPC handshake on the raw [`Conn`], run *before* the connection is
-//! handed to `capnp_rpc::twoparty::VatNetwork`.
-//!
-//! Why exact reads matter: any buffered layer (framed codecs,
-//! `compio_io::compat::AsyncStream`, ...) would read ahead and swallow the
-//! first bytes of the capnp session that starts right after the final `Ack`.
-//! So every packet here is `u32` little-endian length + body, moved with
-//! exact-size `read_exact`/`write_all` on the raw `Conn`. Once
-//! [`authenticate_server`]/[`authenticate_client`] return `Ok(())`, the next
-//! byte on the wire belongs to capnp.
-//!
-//! Wire layout (all integers little-endian):
-//!
-//! - `Hello`      (server→client): `tag=1, version:u16, scheme:u8, nonce_len:u16, nonce`
-//! - `ClientAuth` (client→server): `tag=2, version:u16, scheme:u8, proof_len:u16, proof`
-//! - `Ack`        (server→client): `tag=3, status:u8, reason_len:u16, reason`
 
 use crate::auth::signed_process;
 use crate::error::{HandshakeError, Result, TransportError};
@@ -35,14 +19,8 @@ const HANDSHAKE_VERSION: u16 = 1;
 const NONCE_LEN: usize = 32;
 const HMAC_LABEL: &[u8] = b"ogurpchik/handshake/v1";
 
-/// One timeout per handshake step, one attempt only. The old code resent
-/// `Hello` up to 8 times waiting for a late client; the extra copies landed
-/// in the post-handshake stream and corrupted whatever protocol followed.
 const STEP_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Legitimate handshake packets are tiny (a 32-byte nonce, a 32-byte HMAC,
-/// or a short rejection reason); anything bigger is a peer to drop, not to
-/// allocate for.
 const MAX_PACKET_LEN: u32 = 4096;
 
 const TAG_HELLO: u8 = 1;
@@ -96,9 +74,6 @@ pub enum ConnectionMode {
     OneToMany,
 }
 
-/// Enforces [`ConnectionMode`] at the accept loop: in `OneToOne` mode only
-/// one lease is handed out at a time. Single-threaded by design
-/// (`Rc<Cell<bool>>`) — it lives on the same runtime as everything else.
 #[derive(Clone, Debug)]
 pub struct ConnectionGate {
     mode: ConnectionMode,
@@ -156,16 +131,6 @@ impl Drop for ConnectionLease {
     }
 }
 
-/// Server side: send one `Hello`, read one `ClientAuth`, verify it, answer
-/// `Ack`. On any validation failure a rejection `Ack` is sent first (best
-/// effort) so the client gets a reason instead of a silent hang.
-///
-/// For [`HandshakeMode::SignedProcess`] the client's PID is taken from
-/// [`Conn::peer_identity`] — the OS, never the wire (the old code trusted a
-/// client-supplied PID, which any unsigned process could fake). A transport
-/// that cannot attest the peer fails here with
-/// [`HandshakeError::PeerAttestationUnavailable`] before a single byte is
-/// sent, rather than silently downgrading.
 pub async fn authenticate_server(conn: &mut Conn, mode: &HandshakeMode) -> Result<(), HandshakeError> {
     if matches!(mode, HandshakeMode::Disabled) {
         return Ok(());
@@ -219,9 +184,6 @@ pub async fn authenticate_server(conn: &mut Conn, mode: &HandshakeMode) -> Resul
         HandshakeMode::SignedProcess { public_key } => {
             let pid = attested_pid.expect("attestation checked before hello");
             if let Err(report) = verify_signed_process(pid, public_key) {
-                // The rejection reason is deliberately generic: details
-                // (image paths, PIDs) stay in the local error report, they
-                // are not the connecting process's business.
                 let _ = write_packet(
                     conn,
                     &encode_ack(ACK_REJECTED, b"signed-process verification failed"),
@@ -241,19 +203,12 @@ pub async fn authenticate_server(conn: &mut Conn, mode: &HandshakeMode) -> Resul
     write_packet(conn, &encode_ack(ACK_OK, &[])).await
 }
 
-/// Client side: read `Hello`, answer `ClientAuth`, await `Ack`.
-///
-/// In [`HandshakeMode::SignedProcess`] the `proof` is empty *by design*:
-/// the server attests this process through the OS, so there is nothing to
-/// prove on the wire — and nothing a malicious client could forge either.
 pub async fn authenticate_client(conn: &mut Conn, mode: &HandshakeMode) -> Result<(), HandshakeError> {
     if matches!(mode, HandshakeMode::Disabled) {
         return Ok(());
     }
 
     let hello_body = read_packet_with_timeout(conn).await?;
-    // The server may reject the connection outright (e.g. a one-to-one gate
-    // that already has a session) instead of opening with `Hello`.
     if hello_body.first() == Some(&TAG_ACK) {
         return decode_ack(&hello_body);
     }
@@ -282,17 +237,10 @@ pub async fn authenticate_client(conn: &mut Conn, mode: &HandshakeMode) -> Resul
     decode_ack(&ack_body)
 }
 
-/// Rejects a not-yet-authenticated connection with a reason — used by accept
-/// loops to turn away clients the [`ConnectionGate`] refused, before any
-/// handshake state exists.
 pub async fn reject_connection(conn: &mut Conn, reason: &str) -> Result<(), HandshakeError> {
     write_packet(conn, &encode_ack(ACK_REJECTED, reason.as_bytes())).await
 }
 
-/// Signed-process verification with a PID-reuse guard: the process's
-/// creation time is fixed *before* the (comparatively slow) signature check
-/// and re-read after it. If the process died and its PID was recycled in
-/// between, the creation time changes and we fail closed.
 fn verify_signed_process(pid: u32, public_key: &[u8]) -> Result<(), HandshakeError> {
     let created_before = signed_process::process_creation_time(pid)?;
     signed_process::verify_process_image(pid, public_key)?;
@@ -311,8 +259,6 @@ fn hmac_with_nonce(secret: &[u8], nonce: &[u8]) -> HmacSha256 {
     mac.update(nonce);
     mac
 }
-
-// --- framing: u32 length prefix + body, exact reads on the raw Conn ---
 
 async fn write_packet(conn: &mut Conn, body: &[u8]) -> Result<(), HandshakeError> {
     let mut frame = Vec::with_capacity(4 + body.len());
@@ -344,8 +290,6 @@ async fn read_packet_with_timeout(conn: &mut Conn) -> Result<Vec<u8>, HandshakeE
         Err(_elapsed) => Err(Report::new(HandshakeError::Timeout)),
     }
 }
-
-// --- packet bodies (see module docs for the wire layout) ---
 
 #[derive(BinRead, BinWrite)]
 #[brw(little)]
@@ -480,8 +424,6 @@ mod tests {
         let addr = inner.local_addr().expect("local_addr failed");
         let (server, client) = futures::try_join!(listener.accept(), Conn::connect_tcp(addr))
             .expect("join failed");
-        // Keep the listener alive until the connection is established; it is
-        // not needed afterwards.
         drop(listener);
         (server, client)
     }
@@ -530,10 +472,6 @@ mod tests {
     #[compio::test]
     async fn scheme_mismatch_is_detected_by_client() {
         let (mut server, mut client) = tcp_pair().await;
-        // The server task would wait out the full step timeout for a
-        // ClientAuth that never comes; drop the handle to cancel it (a
-        // dropped compio JoinHandle cancels the task) once the client is
-        // done.
         let server_fut = compio::runtime::spawn(async move {
             authenticate_server(&mut server, &HandshakeMode::hmac(b"s".to_vec())).await
         });
@@ -550,8 +488,6 @@ mod tests {
     #[compio::test]
     async fn signed_process_refused_on_unattestable_transport() {
         let (mut server, _client) = tcp_pair().await;
-        // TCP has no peer-credential facility: the server must refuse before
-        // sending a single byte, not silently downgrade.
         let err = authenticate_server(&mut server, &HandshakeMode::signed_process(vec![0u8; 32]))
             .await
             .expect_err("signed-process on tcp must be refused");
@@ -561,17 +497,12 @@ mod tests {
         ));
     }
 
-    /// The full signed-process flow, and the security property behind the
-    /// rewrite: the server attests the PID it got from the OS, so a client
-    /// that puts a *different* PID into its auth proof changes nothing.
     #[cfg(windows)]
     #[compio::test]
     async fn signed_process_uses_os_pid_not_wire_pid() {
         use base64::Engine;
         use ed25519_dalek::{Signer, SigningKey};
 
-        // Sign this very test executable with a throwaway key: the server
-        // will open our PID, find this image, and verify it against the key.
         let signing_key = SigningKey::from_bytes(&[7u8; 32]);
         let public_key = signing_key.verifying_key().to_bytes().to_vec();
         let image_path = std::env::current_exe().expect("current exe");
@@ -591,7 +522,6 @@ mod tests {
         let server_mode = HandshakeMode::signed_process(public_key.clone());
         let client_mode = HandshakeMode::signed_process(public_key.clone());
 
-        // 1. Honest client: empty proof, OS attestation succeeds.
         {
             let name = format!("ogurpchik-hs-signed-{}", std::process::id());
             let (mut server, mut client) = npipe_pair(&name).await;
@@ -604,11 +534,6 @@ mod tests {
             server_fut.await.unwrap().expect("server handshake failed");
         }
 
-        // 2. Malicious client: claims a made-up PID in its proof. The old
-        //    code would have verified *that* process; the rewrite ignores
-        //    wire data and attests the OS-reported PID — so this still
-        //    passes for our signed test binary, proving the wire PID is
-        //    never consulted.
         {
             let name = format!("ogurpchik-hs-forged-{}", std::process::id());
             let (mut server, mut client) = npipe_pair(&name).await;
@@ -621,7 +546,7 @@ mod tests {
                 .await
                 .expect("read hello");
             let (_version, scheme, _nonce) = decode_hello(&hello_body).expect("decode hello");
-            let forged_proof = 0xDEADu32.to_le_bytes(); // "my pid is 57005, trust me"
+            let forged_proof = 0xDEADu32.to_le_bytes();
             write_packet(&mut client, &encode_client_auth(scheme, &forged_proof))
                 .await
                 .expect("send forged auth");

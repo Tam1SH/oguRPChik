@@ -1,6 +1,3 @@
-//! Shared setup for the benches: a full-stack client session
-//! (Endpoint → handshake → capnp-rpc) per transport, plus a raw `Conn`
-//! pair for the bridge-cost comparison.
 
 use testschema::echo_capnp::echo;
 use ogurpchik::auth::handshake::{HandshakeMode, authenticate_client, authenticate_server};
@@ -28,10 +25,6 @@ pub const TRANSPORTS: &[&str] = if cfg!(windows) {
     &["tcp", "uds"]
 };
 
-/// Binds a listener for `kind` and returns it together with a closure that
-/// produces a connected client `Conn` on each call... not quite: named
-/// pipes need the name, tcp needs the bound port, so this returns the
-/// listener and an `Endpoint`-ish connector closure.
 pub async fn bind(kind: &str) -> (Listener, Box<dyn Fn() -> ConnConnect>) {
     match kind {
         "tcp" => {
@@ -80,8 +73,6 @@ impl ConnConnect {
     }
 }
 
-/// Starts a serve-one task (accept → hmac handshake → spawn Echo
-/// session, held until the peer disconnects) on the current runtime.
 pub fn spawn_server(listener: Listener) {
     compio::runtime::spawn(async move {
         let mut conn = listener.accept().await.expect("accept failed");
@@ -94,7 +85,6 @@ pub fn spawn_server(listener: Listener) {
     .detach();
 }
 
-/// Connects a client and returns its live RPC session.
 pub async fn client_session(connect: ConnConnect) -> RpcSession<echo::Client> {
     let mut conn = connect.connect().await;
     authenticate_client(&mut conn, &HandshakeMode::hmac(b"bench".to_vec()))

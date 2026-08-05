@@ -1,7 +1,3 @@
-//! End-to-end tests over the public API: Endpoint/Listener → handshake →
-//! capnp-rpc session, per transport. Unit-level coverage of the pieces
-//! lives next to them (net/, auth/, rpc); this file proves the assembled
-//! path works the same on every transport.
 
 use testschema::echo_capnp::echo;
 use ogurpchik::auth::handshake::{
@@ -34,17 +30,12 @@ fn hmac() -> HandshakeMode {
     HandshakeMode::hmac(b"integration-secret".to_vec())
 }
 
-/// Server: accept one connection, run the handshake, export Echo.
 async fn serve_one(listener: &Listener) -> RpcSession<echo::Client> {
-    let mut conn = listener.accept().await.expect("accept failed");
-    authenticate_server(&mut conn, &hmac())
+    ogurpchik::rpc::accept_session(listener, &hmac(), EchoImpl)
         .await
-        .expect("server handshake failed");
-    spawn_session(conn, Side::Server, EchoImpl)
+        .expect("accept_session failed")
 }
 
-/// Client: connect, run the handshake, export Echo (bootstrap is
-/// symmetric — the server could call us too).
 async fn connect_client(conn: Conn) -> RpcSession<echo::Client> {
     let mut conn = conn;
     authenticate_client(&mut conn, &hmac())
@@ -70,7 +61,6 @@ async fn ping(session: &RpcSession<echo::Client>, msg: &str) -> String {
 async fn full_stack_ping_pong(listener: Listener, connect: impl std::future::Future<Output = Conn>) {
     let server_task = compio::runtime::spawn(async move {
         let session = serve_one(&listener).await;
-        // Hold the session until the client is done, then let it close.
         compio::time::timeout(std::time::Duration::from_secs(5), session.wait())
             .await
             .ok();
@@ -78,7 +68,6 @@ async fn full_stack_ping_pong(listener: Listener, connect: impl std::future::Fut
 
     let client_session = connect_client(connect.await).await;
     assert_eq!(ping(&client_session, "ping").await, "echo ping");
-    // And back the other way over the same connection (symmetric bootstrap).
     drop(client_session);
     server_task.await.unwrap();
 }
@@ -96,6 +85,34 @@ async fn tcp_full_stack() {
         Conn::connect_tcp(addr).await.expect("connect failed")
     })
     .await;
+}
+
+#[compio::test]
+async fn tcp_facade_roundtrip() {
+    use ogurpchik::rpc::{accept_session, connect_session};
+
+    let endpoint = Endpoint::Tcp("127.0.0.1:0".parse().unwrap());
+    let listener = endpoint.listen().await.expect("listen failed");
+    let Listener::Tcp(inner) = &listener else {
+        unreachable!()
+    };
+    let endpoint = Endpoint::Tcp(inner.local_addr().unwrap());
+
+    let server_task = compio::runtime::spawn(async move {
+        let session = accept_session::<echo::Client, _>(&listener, &hmac(), EchoImpl)
+            .await
+            .expect("accept_session failed");
+        compio::time::timeout(std::time::Duration::from_secs(5), session.wait())
+            .await
+            .ok();
+    });
+
+    let session = connect_session::<echo::Client, _>(&endpoint, &hmac(), EchoImpl)
+        .await
+        .expect("connect_session failed");
+    assert_eq!(ping(&session, "facade").await, "echo facade");
+    drop(session);
+    server_task.await.unwrap();
 }
 
 #[compio::test]
@@ -131,8 +148,6 @@ async fn vsock_loopback_full_stack() {
     .await;
 }
 
-/// A wrong HMAC secret must fail both sides: the server rejects, the client
-/// receives the rejection (not a timeout, not a hang).
 #[compio::test]
 async fn wrong_hmac_is_rejected() {
     let endpoint = Endpoint::Tcp("127.0.0.1:0".parse().unwrap());
@@ -165,8 +180,6 @@ async fn wrong_hmac_is_rejected() {
     ));
 }
 
-/// `ConnectionMode::OneToOne`: the second concurrent client is turned away
-/// with an explicit rejection before any handshake bytes are exchanged.
 #[compio::test]
 async fn one_to_one_rejects_second_client() {
     let endpoint = Endpoint::Tcp("127.0.0.1:0".parse().unwrap());
@@ -178,8 +191,6 @@ async fn one_to_one_rejects_second_client() {
 
     let server_task = compio::runtime::spawn(async move {
         let gate = ConnectionGate::new(ConnectionMode::OneToOne);
-        // First client: acquires the lease, handshakes, session lives until
-        // the client drops.
         let mut first = listener.accept().await.expect("accept first failed");
         let _lease = gate.try_acquire().expect("first client must acquire the gate");
         authenticate_server(&mut first, &hmac())
@@ -191,7 +202,6 @@ async fn one_to_one_rejects_second_client() {
             EchoImpl,
         );
 
-        // Second client: gate is taken, reject before the handshake.
         let mut second = listener.accept().await.expect("accept second failed");
         assert!(gate.try_acquire().is_none());
         reject_connection(&mut second, "one-to-one server is busy")
@@ -218,16 +228,13 @@ async fn one_to_one_rejects_second_client() {
     server_task.await.unwrap();
 }
 
-/// A message beyond the traversal limit must not be processed: the
-/// handler never runs and the server tears the connection down. The session
-/// here uses a deliberately tiny limit so the test doesn't move megabytes.
 #[compio::test]
 async fn oversized_message_trips_traversal_limit() {
     use ogurpchik::rpc::spawn_session_with_options;
 
     let tiny_limits = || {
         let mut options = capnp::message::ReaderOptions::new();
-        options.traversal_limit_in_words(Some(8 * 1024)); // 64 KiB
+        options.traversal_limit_in_words(Some(8 * 1024));
         options
     };
     let handler_ran = std::rc::Rc::new(std::cell::Cell::new(false));
@@ -264,9 +271,6 @@ async fn oversized_message_trips_traversal_limit() {
                 TrackImpl(handler_ran),
                 tiny_limits(),
             );
-            // If the limit is enforced, the read side errors and wait()
-            // returns; if it is not, the ping would be answered and wait()
-            // would keep hanging until this timeout fires.
             compio::time::timeout(std::time::Duration::from_secs(5), session.wait())
                 .await
                 .expect("server session hung: the oversized message got through")
@@ -285,7 +289,7 @@ async fn oversized_message_trips_traversal_limit() {
         tiny_limits(),
     );
 
-    let big = "x".repeat(1024 * 1024); // 1 MiB >> 64 KiB traversal limit
+    let big = "x".repeat(1024 * 1024);
     let mut req = client_session.remote().ping_request();
     req.get().set_msg(&big[..]);
     let _ = req.send();

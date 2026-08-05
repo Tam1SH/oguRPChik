@@ -2,37 +2,18 @@ use core::fmt;
 
 use error_stack::Report;
 
-/// Top-level, public error context. This is what a caller of `Client`/`Server`
-/// sees; `report.downcast_ref::<TransportError>()` or
-/// `report.downcast_ref::<HandshakeError>()` recover the layer below when
-/// that level of detail is needed.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum RpcError {
-    /// Failed while establishing a connection. The transport/handshake
-    /// layers underneath carry the specifics.
     Setup,
-    /// The remote peer's capnp RPC layer returned an exception for a call
-    /// this side made.
     Remote {
-        /// The general nature of the remote failure — see
-        /// [`capnp::ErrorKind`] for what each variant means operationally.
         kind: RemoteErrorKind,
     },
-    /// This side's handler for an incoming call returned an error.
     Handler,
-    /// A remote call targeted a method this side does not implement.
     Unimplemented,
-    /// The peer's message exceeded a configured limit
-    /// (`traversal_limit_in_words` / `nesting_limit`); the connection was
-    /// dropped rather than risk unbounded memory use.
     LimitExceeded,
 }
 
-/// Mirrors the RPC-relevant subset of `capnp::ErrorKind`. `capnp::ErrorKind`
-/// is `#[non_exhaustive]` and has many internal decode-error variants beyond
-/// these four; anything else collapses to [`Other`](Self::Other) here rather
-/// than growing this enum every time capnp adds a new internal kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RemoteErrorKind {
@@ -57,14 +38,6 @@ impl fmt::Display for RpcError {
 
 impl core::error::Error for RpcError {}
 
-/// The text of a remote exception, attached to a [`Report`] for local
-/// diagnostics only.
-///
-/// **Never forward this to another peer.** By default a `capnp::Error`'s
-/// `extra` text can contain anything the remote side's error path put there —
-/// paths, PIDs, internal state — and in our topology the "remote side" can be
-/// an untrusted plugin. See [`to_capnp_exception`] for the outgoing half of
-/// this boundary.
 #[derive(Debug)]
 pub struct RemoteMessage(pub String);
 
@@ -74,11 +47,6 @@ impl fmt::Display for RemoteMessage {
     }
 }
 
-/// Converts an incoming `capnp::Error` (a remote exception we received) into
-/// a `Report<RpcError>`. The remote's message text is preserved as a
-/// [`RemoteMessage`] attachment for local logs; it is not part of the
-/// `RpcError` context itself, so `current_context()` still matches cleanly on
-/// `RpcError::Remote { kind }` without needing to inspect the text.
 pub fn from_capnp_exception(err: &capnp::Error) -> Report<RpcError> {
     let kind = match err.kind {
         capnp::ErrorKind::Failed => RemoteErrorKind::Failed,
@@ -90,21 +58,6 @@ pub fn from_capnp_exception(err: &capnp::Error) -> Report<RpcError> {
     Report::new(RpcError::Remote { kind }).attach(RemoteMessage(err.extra.clone()))
 }
 
-/// Converts a local `Report<C>` into the `capnp::Error` that gets sent to the
-/// peer as an exception — **through an explicit allowlist**, not by
-/// stringifying the whole report.
-///
-/// This is a security boundary, not a style choice: `Report`'s attachments
-/// routinely carry local paths, PIDs, and other diagnostic detail (see
-/// [`crate::auth`]), and the peer receiving this exception may be an
-/// untrusted plugin. Only `context.to_string()` — the short, deliberately
-/// written `Display` impl of the context enum itself — crosses the wire.
-/// Everything attached to the report (the "why", as opposed to the "what")
-/// stays in the local log.
-///
-/// `RpcError::Remote`/`RpcError::Setup` map to `Disconnected`/`Failed`
-/// respectively so a peer that forwards an error it received from a third
-/// party doesn't misreport it as its own failure.
 pub fn to_capnp_exception<C>(report: &Report<C>) -> capnp::Error
 where
     C: fmt::Display + Send + Sync + 'static,
@@ -153,9 +106,6 @@ mod tests {
 
     #[test]
     fn outgoing_exception_never_carries_attachments() {
-        // A handler error that accidentally attaches something sensitive
-        // (a filesystem path, in this case) must not leak that text to the
-        // peer — only the context's own Display output crosses the wire.
         let report = Report::new(SensitivePath(std::path::PathBuf::from(
             "/run/user/1000/very-secret-service.sock",
         )))
@@ -193,10 +143,6 @@ mod tests {
 
     #[test]
     fn remote_forwarded_as_disconnected_not_local_failure() {
-        // If we received a remote exception and, say, log-and-forward it as
-        // our own outgoing exception, it must not be reported as if *we*
-        // failed - the peer should see Disconnected/whatever RpcError::Remote
-        // maps to, not a generic Failed that looks like our own bug.
         let incoming = from_capnp_exception(&capnp::Error::failed("upstream broke".to_string()));
         let outgoing = to_capnp_exception(&incoming);
         assert_eq!(outgoing.kind, capnp::ErrorKind::Disconnected);

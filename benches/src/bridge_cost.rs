@@ -1,8 +1,3 @@
-//! The cost of the completion→poll bridge: a 1 KiB round-trip on a raw
-//! `Conn` (compio completion model) vs the same round-trip through
-//! `compio::io::compat::AsyncStream` (futures-io poll model, what
-//! `VatNetwork` reads/writes). Quantifies the price the RPC layer pays for
-//! the bridge.
 
 mod common;
 
@@ -14,7 +9,6 @@ use futures_util::{AsyncReadExt as _, AsyncWriteExt as _};
 
 const PAYLOAD: usize = 1024;
 
-/// Raw `Conn` ping-pong: client writes PAYLOAD bytes, server echoes.
 async fn raw_roundtrip(client: &mut ogurpchik::net::Conn) {
     let BufResult(res, _) = client.write_all(vec![0xAB; PAYLOAD]).await;
     res.expect("write failed");
@@ -22,7 +16,6 @@ async fn raw_roundtrip(client: &mut ogurpchik::net::Conn) {
     res.expect("read failed");
 }
 
-/// Same through the futures-io bridge.
 async fn bridged_roundtrip(client: &mut AsyncStream<ogurpchik::net::Conn>) {
     client.write_all(&[0xAB; PAYLOAD]).await.expect("write failed");
     client
@@ -38,7 +31,6 @@ fn bench_bridge_cost(c: &mut Criterion) {
     for &kind in common::TRANSPORTS {
         let (listener, connect) = runtime.block_on(common::bind(kind));
 
-        // Echo server for the raw variant: accept, then loop echoing.
         let (echo_listener, echo_connect) = (listener, connect);
         compio::runtime::spawn(async move {
             let mut conn = echo_listener.accept().await.expect("accept failed");
@@ -62,7 +54,6 @@ fn bench_bridge_cost(c: &mut Criterion) {
             b.iter(|| runtime.block_on(raw_roundtrip(&mut raw_client)));
         });
 
-        // Echo server for the bridged variant (fresh connection, same shape).
         let (listener2, connect2) = runtime.block_on(common::bind(kind));
         compio::runtime::spawn(async move {
             let conn = listener2.accept().await.expect("accept failed");

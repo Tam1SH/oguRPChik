@@ -1,21 +1,3 @@
-//! Bridge from an authenticated [`Conn`] to a running capnp-rpc session.
-//!
-//! The full path, per connection:
-//!
-//! ```text
-//! Conn (post-handshake)
-//!   → conn.clone() twice (read half / write half — Clone shares the handle)
-//!   → compio::io::compat::AsyncStream (completion→poll bridge)
-//!   → capnp_rpc::twoparty::VatNetwork
-//!   → capnp_rpc::RpcSystem
-//!   → compio::runtime::spawn (local, !Send throughout — matches capnp-rpc's
-//!     !Send design and this crate's single-threaded model)
-//! ```
-//!
-//! Nothing here is buffered between the handshake and `VatNetwork`: the
-//! handshake ([`crate::auth::handshake`]) reads exact sizes off the raw
-//! `Conn`, so the first byte `VatNetwork` reads is the first byte of the
-//! capnp session.
 
 use crate::error::{RpcError, from_capnp_exception};
 use crate::net::Conn;
@@ -24,50 +6,27 @@ use capnp::message::ReaderOptions;
 use capnp_rpc::{RpcSystem, twoparty};
 use compio::io::compat::AsyncStream;
 use compio::runtime::JoinHandle;
-use error_stack::Report;
+use error_stack::{Report, ResultExt};
 
-/// Which end of a twoparty connection this side is. Re-exported so callers
-/// don't need to depend on `capnp-rpc` directly for the session API.
 pub use capnp_rpc::rpc_twoparty_capnp::Side;
 
-/// Reader limits, set explicitly because capnp's defaults
-/// (8M words traversal = 64 MiB, 64 nesting) are sized for a *trusted*
-/// peer. Plugins and VM agents are not trusted to that degree, so both
-/// limits are tightened here. A peer exceeding them gets its connection
-/// dropped, surfaced as [`RpcError::LimitExceeded`] — not unbounded memory
-/// use.
 pub fn default_reader_options() -> ReaderOptions {
     let mut options = ReaderOptions::new();
-    options.traversal_limit_in_words(Some(1024 * 1024)); // 8 MiB
+    options.traversal_limit_in_words(Some(1024 * 1024));
     options.nesting_limit(32);
     options
 }
 
-/// A live RPC session: the remote side's bootstrap capability plus the
-/// handle driving the [`RpcSystem`].
-///
-/// **Shutdown semantics:** dropping the session drops the [`JoinHandle`]
-/// *without* detaching it, and a dropped compio `JoinHandle` cancels the
-/// task — the `RpcSystem` future is dropped, the `VatNetwork` with it, and
-/// the underlying `Conn` actually closes. (`.detach()` would instead leave
-/// the driver running in the background, holding the socket open forever —
-/// this bit us in the spike's disconnect test.)
 pub struct RpcSession<C: FromClientHook> {
     remote: C,
     driver: JoinHandle<Result<(), capnp::Error>>,
 }
 
 impl<C: FromClientHook> RpcSession<C> {
-    /// The remote side's bootstrap capability — calls on it go over this
-    /// connection. Cheap to clone (it's an `Rc` inside).
     pub fn remote(&self) -> &C {
         &self.remote
     }
 
-    /// Waits for the RPC system to finish: a clean peer disconnect resolves
-    /// `Ok(())` (`RpcSystem` itself downgrades `Disconnected` to `Ok`), any
-    /// other failure becomes a [`Report`](error_stack::Report) via
-    /// [`from_capnp_exception`].
     pub async fn wait(self) -> crate::error::Result<(), RpcError> {
         let Self { remote, driver } = self;
         drop(remote);
@@ -80,11 +39,6 @@ impl<C: FromClientHook> RpcSession<C> {
     }
 }
 
-/// Starts a symmetric twoparty RPC session over an already-authenticated
-/// connection. `local_bootstrap` is this side's exported capability
-/// implementation (a generated `Server` trait impl); the returned
-/// [`RpcSession`] exposes the *remote* side's bootstrap capability, so both
-/// ends can call each other over the single connection.
 pub fn spawn_session<C, S>(conn: Conn, side: Side, local_bootstrap: S) -> RpcSession<C>
 where
     C: FromServer<S> + FromClientHook,
@@ -130,6 +84,38 @@ where
     }
 }
 
+pub async fn accept_session<C, S>(
+    listener: &crate::net::Listener,
+    mode: &crate::auth::handshake::HandshakeMode,
+    local_bootstrap: S,
+) -> crate::error::Result<RpcSession<C>, RpcError>
+where
+    C: FromServer<S> + FromClientHook,
+    S: 'static,
+{
+    let mut conn = listener.accept().await.change_context(RpcError::Setup)?;
+    crate::auth::handshake::authenticate_server(&mut conn, mode)
+        .await
+        .change_context(RpcError::Setup)?;
+    Ok(spawn_session(conn, Side::Server, local_bootstrap))
+}
+
+pub async fn connect_session<C, S>(
+    endpoint: &crate::endpoint::Endpoint,
+    mode: &crate::auth::handshake::HandshakeMode,
+    local_bootstrap: S,
+) -> crate::error::Result<RpcSession<C>, RpcError>
+where
+    C: FromServer<S> + FromClientHook,
+    S: 'static,
+{
+    let mut conn = endpoint.connect().await.change_context(RpcError::Setup)?;
+    crate::auth::handshake::authenticate_client(&mut conn, mode)
+        .await
+        .change_context(RpcError::Setup)?;
+    Ok(spawn_session(conn, Side::Client, local_bootstrap))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,8 +143,6 @@ mod tests {
             results.get().set_reply(format!("{}: echo {}", self.label, msg));
             Ok(())
         }
-        // stat deliberately left at its default (unimplemented) — the
-        // unimplemented test relies on that.
     }
 
     async fn uds_pair(tag: &str) -> (Conn, Conn) {
@@ -198,10 +182,6 @@ mod tests {
             .to_string()
     }
 
-    /// The property the exact-read handshake exists for: after the final
-    /// Ack, the very next byte must already belong to capnp. If the
-    /// handshake layer had buffered anything, this test would hang or
-    /// corrupt.
     #[compio::test]
     async fn handshake_then_rpc_roundtrip() {
         let (mut server_conn, mut client_conn) = uds_pair("hs").await;
@@ -212,7 +192,6 @@ mod tests {
                 .await
                 .expect("server handshake failed");
             let session = spawn_agent(server_conn, Side::Server, "host");
-            // Answer one ping, then wait for the client to disconnect.
             compio::time::timeout(Duration::from_secs(5), session.wait())
                 .await
                 .expect("server session timed out")
@@ -225,13 +204,11 @@ mod tests {
         let session = spawn_agent(client_conn, Side::Client, "agent");
         let reply = ping(session.remote(), "hello").await;
         assert_eq!(reply, "host: echo hello");
-        drop(session); // cancels the client driver, closing the connection
+        drop(session);
 
         server_task.await.unwrap();
     }
 
-    /// Symmetric bootstrap: both sides export `Echo` and call each
-    /// other over the same connection, simultaneously.
     #[compio::test]
     async fn bidirectional_calls_over_one_connection() {
         let (server_conn, client_conn) = uds_pair("bidi").await;
@@ -246,9 +223,6 @@ mod tests {
         assert_eq!(from_agent, "agent: echo up");
     }
 
-    /// A method the server left at its default must come back as
-    /// `unimplemented`, not a hang or a decode error — this is what schema
-    /// evolution (new method ordinals) relies on for mixed-version peers.
     #[compio::test]
     async fn unimplemented_method_reports_unimplemented() {
         let (server_conn, client_conn) = uds_pair("unimpl").await;
@@ -264,9 +238,6 @@ mod tests {
         assert!(matches!(err.kind, capnp::ErrorKind::Unimplemented));
     }
 
-    /// Dropping the client session (JoinHandle dropped, not detached) must
-    /// close the connection and let the server's `wait()` resolve — no
-    /// detached-driver socket leak.
     #[compio::test]
     async fn client_disconnect_lets_server_finish() {
         let (server_conn, client_conn) = uds_pair("drop").await;

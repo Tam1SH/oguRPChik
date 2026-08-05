@@ -1,5 +1,3 @@
-//! RPC call latency per transport: full stack (handshake once at setup,
-//! then capnp ping round-trips).
 
 mod common;
 

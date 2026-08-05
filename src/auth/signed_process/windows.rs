@@ -11,15 +11,10 @@ use windows::Win32::System::Threading::{
 };
 use windows::core::PWSTR;
 
-/// Creation time of the process `pid` (as a `FILETIME` value). Read this
-/// *before* verifying the image signature and again after: if the process
-/// dies and its PID is recycled mid-check, the value changes and the caller
-/// fails closed.
 pub(crate) fn process_creation_time(pid: u32) -> Result<u64, HandshakeError> {
     ProcessHandle::open(pid)?.creation_time()
 }
 
-/// Verifies that the image of process `pid` is signed by `public_key`.
 pub(crate) fn verify_process_image(pid: u32, public_key: &[u8]) -> Result<(), HandshakeError> {
     let handle = ProcessHandle::open(pid)?;
     let image_path = handle.image_path()?;

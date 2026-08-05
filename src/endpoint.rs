@@ -1,16 +1,3 @@
-//! Service discovery by convention — no registry, no KV store, no
-//! discovery daemon. Both sides derive the same address from the same
-//! service name:
-//!
-//! - Windows: `\\.\pipe\<app>.<service>` (named pipe — the only Windows
-//!   transport with peer credentials, hence the plugin default there);
-//! - Linux: `$XDG_RUNTIME_DIR/<app>/<service>.sock`, falling back to
-//!   `/tmp/<app>-<uid>/`;
-//! - host↔agent: vsock with the port as a per-service constant
-//!   ([`Endpoint::vsock_to_host`] / [`Endpoint::vsock_to_best_vm`]).
-//!
-//! Readiness is equally conventional: the service is ready when connecting
-//! succeeds, so [`Endpoint::connect_ready`] just retries with backoff.
 
 use crate::error::{EndpointError, Result, TransportError};
 use crate::net::vsock::VsockTarget;
@@ -21,26 +8,15 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-/// A concrete address a [`Listener`] binds or a [`Conn`] connects to.
-/// Chosen at the call site, matched at runtime — deliberately not a type
-/// parameter (see `net/mod.rs` docs).
 #[derive(Debug, Clone)]
 pub enum Endpoint {
     Vsock { target: VsockTarget, port: u32 },
     Uds(PathBuf),
-    /// Full pipe path (`\\.\pipe\...`). Constructible on any platform so
-    /// configs stay portable, but binding/connecting fails off Windows.
     Npipe(String),
     Tcp(SocketAddr),
 }
 
 impl Endpoint {
-    /// The conventional endpoint for a service of application `app`.
-    ///
-    /// `app` and `service` become path/pipe-name components, so they are
-    /// restricted to `[A-Za-z0-9_-]` — anything else is rejected rather
-    /// than sanitized, because a silent rename means the two sides derive
-    /// *different* addresses and the failure shows up miles away.
     pub fn for_service(app: &str, service: &str) -> Result<Self, EndpointError> {
         validate_name(app)?;
         validate_name(service)?;
@@ -55,9 +31,6 @@ impl Endpoint {
         }
     }
 
-    /// Guest → host over vsock: CID 2 is `VMADDR_CID_HOST` on Linux and
-    /// maps to `HV_GUID_PARENT` on Windows, so one constant expresses
-    /// "the host" on both.
     pub fn vsock_to_host(port: u32) -> Self {
         Self::Vsock {
             target: VsockTarget::Cid(2),
@@ -65,9 +38,6 @@ impl Endpoint {
         }
     }
 
-    /// Host → the "best" local VM (WSL if present, else the sole running
-    /// VM) over vsock, resolved via `vmcompute.dll`. Replaces the old
-    /// `Hosts\<name>` registry lookup.
     #[cfg(windows)]
     pub fn vsock_to_best_vm(port: u32) -> Result<Self, EndpointError> {
         let guid = crate::net::vsock::utils::get_best_vmid()
@@ -113,9 +83,6 @@ impl Endpoint {
         }
     }
 
-    /// Connect, retrying with exponential backoff until `give_up_after`
-    /// elapses. "The service accepts connections" *is* the readiness
-    /// signal — there is no separate registration step to wait for.
     pub async fn connect_ready(&self, give_up_after: Duration) -> Result<Conn, TransportError> {
         let start = std::time::Instant::now();
         let mut delay = Duration::from_millis(50);
@@ -160,9 +127,6 @@ fn validate_name(name: &str) -> Result<(), EndpointError> {
     }
 }
 
-/// `$XDG_RUNTIME_DIR/<app>`, falling back to `/tmp/<app>-<uid>`. The
-/// directory is created if missing — `bind()` on a socket in a nonexistent
-/// directory fails with a confusing `NotFound` otherwise.
 #[cfg(not(windows))]
 fn runtime_dir(app: &str) -> Result<PathBuf, EndpointError> {
     let base = std::env::var_os("XDG_RUNTIME_DIR")
@@ -245,14 +209,13 @@ mod tests {
 
     #[compio::test]
     async fn connect_ready_succeeds_once_service_appears() {
-        // Nothing is listening yet; start the listener shortly after.
         let placeholder = Endpoint::Tcp("127.0.0.1:0".parse().unwrap());
         let early = placeholder.listen().await.expect("listen failed");
         let Listener::Tcp(inner) = &early else {
             unreachable!()
         };
         let endpoint = Endpoint::Tcp(inner.local_addr().expect("local_addr failed"));
-        drop(early); // free the port; connect_ready must outlast the gap
+        drop(early);
 
         let listener_task = compio::runtime::spawn({
             let endpoint = endpoint.clone();
@@ -268,7 +231,6 @@ mod tests {
             .expect("connect_ready gave up too early");
         drop(conn);
         let listener = listener_task.await.unwrap();
-        // Accept the pending connection to prove the pair is real.
         let server = listener.accept().await.expect("accept failed");
         assert_eq!(server.kind(), "tcp");
     }

@@ -1,7 +1,3 @@
-//! Signed-process attestation: verify that the *OS-reported* peer PID runs
-//! an image signed by the expected key. The PID itself always comes from
-//! [`crate::net::Conn::peer_identity`], never from the wire — this module
-//! only answers "does process `pid` run a properly signed image?".
 
 use crate::error::{HandshakeError, Result};
 use base64::Engine;
