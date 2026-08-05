@@ -6,5 +6,6 @@ pub mod discovery;
 pub mod error;
 pub mod high;
 pub mod low;
+pub mod net;
 pub mod pool;
 pub mod transport;
