@@ -1,5 +1,6 @@
 use crate::auth::signed_process::verify_signed_file;
-use anyhow::Context;
+use crate::error::{HandshakeError, Result};
+use error_stack::ResultExt;
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
@@ -10,9 +11,17 @@ use windows::Win32::System::Threading::{
 };
 use windows::core::PWSTR;
 
-pub(crate) fn verify_process(pid: u32, public_key: &[u8]) -> anyhow::Result<()> {
+/// Creation time of the process `pid` (as a `FILETIME` value). Read this
+/// *before* verifying the image signature and again after: if the process
+/// dies and its PID is recycled mid-check, the value changes and the caller
+/// fails closed.
+pub(crate) fn process_creation_time(pid: u32) -> Result<u64, HandshakeError> {
+    ProcessHandle::open(pid)?.creation_time()
+}
+
+/// Verifies that the image of process `pid` is signed by `public_key`.
+pub(crate) fn verify_process_image(pid: u32, public_key: &[u8]) -> Result<(), HandshakeError> {
     let handle = ProcessHandle::open(pid)?;
-    let _created_at = handle.creation_time()?;
     let image_path = handle.image_path()?;
     verify_signed_file(&image_path, public_key)
 }
@@ -20,13 +29,14 @@ pub(crate) fn verify_process(pid: u32, public_key: &[u8]) -> anyhow::Result<()> 
 struct ProcessHandle(HANDLE);
 
 impl ProcessHandle {
-    fn open(pid: u32) -> anyhow::Result<Self> {
+    fn open(pid: u32) -> Result<Self, HandshakeError> {
         let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
-            .with_context(|| format!("failed to open process {pid}"))?;
+            .change_context(HandshakeError::SignedProcessVerificationFailed)
+            .attach(format!("failed to open process {pid}"))?;
         Ok(Self(handle))
     }
 
-    fn image_path(&self) -> anyhow::Result<PathBuf> {
+    fn image_path(&self) -> Result<PathBuf, HandshakeError> {
         let mut buf = vec![0u16; 32_768];
         let mut len = buf.len() as u32;
         unsafe {
@@ -37,17 +47,19 @@ impl ProcessHandle {
                 &mut len,
             )
         }
-        .context("failed to query process image path")?;
+        .change_context(HandshakeError::SignedProcessVerificationFailed)
+        .attach("failed to query process image path")?;
         Ok(PathBuf::from(OsString::from_wide(&buf[..len as usize])))
     }
 
-    fn creation_time(&self) -> anyhow::Result<u64> {
+    fn creation_time(&self) -> Result<u64, HandshakeError> {
         let mut creation = FILETIME::default();
         let mut exit = FILETIME::default();
         let mut kernel = FILETIME::default();
         let mut user = FILETIME::default();
         unsafe { GetProcessTimes(self.0, &mut creation, &mut exit, &mut kernel, &mut user) }
-            .context("failed to query process times")?;
+            .change_context(HandshakeError::SignedProcessVerificationFailed)
+            .attach("failed to query process times")?;
         Ok(((creation.dwHighDateTime as u64) << 32) | creation.dwLowDateTime as u64)
     }
 }

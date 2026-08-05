@@ -35,6 +35,10 @@ pub enum HandshakeError {
     SignedProcessVerificationFailed,
     /// The server is in `one_to_one` mode and already has an active session.
     ConnectionLimitReached,
+    /// A local OS facility or the transport itself failed mid-handshake
+    /// (the peer went away, the RNG failed, ...). The underlying
+    /// `TransportError`/`io::Error` is attached or layered underneath.
+    Io,
 }
 
 impl fmt::Display for HandshakeError {
@@ -55,6 +59,7 @@ impl fmt::Display for HandshakeError {
             Self::ConnectionLimitReached => {
                 f.write_str("connection rejected: server is in one-to-one mode")
             }
+            Self::Io => f.write_str("i/o failure during handshake"),
         }
     }
 }
