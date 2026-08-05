@@ -1,9 +1,15 @@
 
+#[cfg(windows)]
 use crate::error::{HandshakeError, Result};
+#[cfg(windows)]
 use base64::Engine;
+#[cfg(windows)]
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+#[cfg(windows)]
 use error_stack::{Report, ResultExt};
+#[cfg(windows)]
 use std::fs;
+#[cfg(windows)]
 use std::path::{Path, PathBuf};
 
 #[cfg(windows)]
@@ -16,6 +22,7 @@ pub(crate) use windows::{process_creation_time, verify_process_image};
 #[cfg(not(windows))]
 pub(crate) use windows_stub::{process_creation_time, verify_process_image};
 
+#[cfg(windows)]
 pub(crate) fn verify_signed_file(image_path: &Path, public_key: &[u8]) -> Result<(), HandshakeError> {
     let verifying_key = parse_verifying_key(public_key)?;
     let signature_path = signature_path_for(image_path);
@@ -32,6 +39,7 @@ pub(crate) fn verify_signed_file(image_path: &Path, public_key: &[u8]) -> Result
     Ok(())
 }
 
+#[cfg(windows)]
 fn parse_verifying_key(public_key: &[u8]) -> Result<VerifyingKey, HandshakeError> {
     let decoded = if public_key.len() == 32 {
         public_key.to_vec()
@@ -53,6 +61,7 @@ fn parse_verifying_key(public_key: &[u8]) -> Result<VerifyingKey, HandshakeError
     VerifyingKey::from_bytes(&key_bytes).change_context(HandshakeError::SignedProcessVerificationFailed)
 }
 
+#[cfg(windows)]
 fn read_signature(path: &Path) -> Result<Signature, HandshakeError> {
     let raw = match fs::read_to_string(path) {
         Ok(text) => match base64::engine::general_purpose::STANDARD.decode(text.trim()) {
@@ -68,13 +77,14 @@ fn read_signature(path: &Path) -> Result<Signature, HandshakeError> {
     Signature::from_slice(&raw).change_context(HandshakeError::SignedProcessVerificationFailed)
 }
 
+#[cfg(windows)]
 fn signature_path_for(image_path: &Path) -> PathBuf {
     let mut os = image_path.as_os_str().to_owned();
     os.push(".sig");
     PathBuf::from(os)
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod tests {
     use super::verify_signed_file;
     use base64::Engine;

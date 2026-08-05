@@ -2,7 +2,9 @@
 use crate::error::{EndpointError, Result, TransportError};
 use crate::net::vsock::VsockTarget;
 use crate::net::{Conn, Listener};
-use error_stack::{Report, ResultExt};
+use error_stack::Report;
+#[cfg(windows)]
+use error_stack::ResultExt;
 use std::fmt;
 use std::net::SocketAddr;
 use std::path::PathBuf;
