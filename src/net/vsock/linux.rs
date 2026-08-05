@@ -1,7 +1,7 @@
 use compio::BufResult;
 use compio::buf::{IntoInner, IoBuf, IoBufMut};
 use compio::driver::SharedFd;
-use compio::driver::op::{Accept, Connect, Recv, Send};
+use compio::driver::op::{Accept, Connect, Recv, Send, BufResultExt};
 use compio::io::{AsyncRead, AsyncWrite};
 use compio::runtime::{Attacher, submit};
 use socket2::{Domain, SockAddr, Socket, Type};
@@ -66,7 +66,8 @@ impl AsFd for VsockHandle {
 impl AsyncRead for VsockStream {
     async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
         let op = Recv::new(VsockHandle(self.inner.clone()), buf, 0);
-        submit(op).await.map_buffer(|op| op.into_inner())
+        let res = submit(op).await.into_inner();
+        unsafe { res.map_advanced() }
     }
 }
 

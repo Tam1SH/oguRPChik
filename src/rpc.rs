@@ -90,6 +90,19 @@ where
     C: FromServer<S> + FromClientHook,
     S: 'static,
 {
+    spawn_session_with_options(conn, side, local_bootstrap, default_reader_options())
+}
+
+pub fn spawn_session_with_options<C, S>(
+    conn: Conn,
+    side: Side,
+    local_bootstrap: S,
+    reader_options: ReaderOptions,
+) -> RpcSession<C>
+where
+    C: FromServer<S> + FromClientHook,
+    S: 'static,
+{
     let local_client: C = capnp_rpc::new_client(local_bootstrap);
     let untyped = Client {
         hook: local_client.into_client_hook(),
@@ -101,7 +114,7 @@ where
         reader,
         writer,
         side,
-        default_reader_options(),
+        reader_options,
     ));
 
     let mut rpc_system = RpcSystem::new(network, Some(untyped));
@@ -120,23 +133,23 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_capnp::agent_control;
     use crate::auth::handshake::{HandshakeMode, authenticate_client, authenticate_server};
     use crate::net::Listener;
     use capnp::capability::Rc;
     use std::cell::RefCell;
     use std::time::Duration;
+    use testschema::echo_capnp::echo;
 
-    struct AgentControlImpl {
+    struct EchoImpl {
         label: &'static str,
         pings: RefCell<Vec<String>>,
     }
 
-    impl agent_control::Server for AgentControlImpl {
+    impl echo::Server for EchoImpl {
         async fn ping(
             self: Rc<Self>,
-            params: agent_control::PingParams,
-            mut results: agent_control::PingResults,
+            params: echo::PingParams,
+            mut results: echo::PingResults,
         ) -> std::result::Result<(), capnp::Error> {
             let msg = params.get()?.get_msg()?;
             let msg = msg.to_str()?;
@@ -144,8 +157,8 @@ mod tests {
             results.get().set_reply(format!("{}: echo {}", self.label, msg));
             Ok(())
         }
-        // subscribe_metrics / get_host_events deliberately left at their
-        // default (unimplemented) — the unimplemented test relies on that.
+        // stat deliberately left at its default (unimplemented) — the
+        // unimplemented test relies on that.
     }
 
     async fn uds_pair(tag: &str) -> (Conn, Conn) {
@@ -160,18 +173,18 @@ mod tests {
         (server, client)
     }
 
-    fn spawn_agent(conn: Conn, side: Side, label: &'static str) -> RpcSession<agent_control::Client> {
+    fn spawn_agent(conn: Conn, side: Side, label: &'static str) -> RpcSession<echo::Client> {
         spawn_session(
             conn,
             side,
-            AgentControlImpl {
+            EchoImpl {
                 label,
                 pings: RefCell::new(Vec::new()),
             },
         )
     }
 
-    async fn ping(remote: &agent_control::Client, msg: &str) -> String {
+    async fn ping(remote: &echo::Client, msg: &str) -> String {
         let mut req = remote.ping_request();
         req.get().set_msg(msg);
         let reply = req.send().promise.await.expect("rpc call failed");
@@ -217,7 +230,7 @@ mod tests {
         server_task.await.unwrap();
     }
 
-    /// Symmetric bootstrap: both sides export `AgentControl` and call each
+    /// Symmetric bootstrap: both sides export `Echo` and call each
     /// other over the same connection, simultaneously.
     #[compio::test]
     async fn bidirectional_calls_over_one_connection() {
@@ -242,7 +255,7 @@ mod tests {
         let _server_session = spawn_agent(server_conn, Side::Server, "host");
         let client_session = spawn_agent(client_conn, Side::Client, "agent");
 
-        let req = client_session.remote().subscribe_metrics_request();
+        let req = client_session.remote().stat_request();
         let result = req.send().promise.await;
         let err = match result {
             Ok(_) => panic!("unimplemented method must fail"),

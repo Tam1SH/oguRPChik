@@ -1,232 +1,110 @@
-#![allow(dead_code)]
+//! Shared setup for the benches: a full-stack client session
+//! (Endpoint → handshake → capnp-rpc) per transport, plus a raw `Conn`
+//! pair for the bridge-cost comparison.
 
-use std::path::PathBuf;
-use compio::net::{UnixListener, UnixStream};
-use ogurpchik::{
-    codecs::{
-        base::{BufferAllocator, HasAllocator, MessageCodec, OwnedBuf, ReleasableBuf},
-        rkyv_protocol::RkyvCodec,
-        serde_compatible::bitcode::BitcodeCodec,
-        serde_protocol::VecBuf,
-    },
-    discovery::ServiceRegistration,
-    high::{
-        client::Client,
-        node::Node,
-        service_handler::ServiceHandler,
-    },
-    pool::{
-        allocator::{SharedAllocator, TpcAllocator},
-        buf_guard::BufGuard,
-    },
-    transport::{
-        base::{MessageSink, TransportBuilder, pool_config::PoolConfig},
-        impls::peer::{implementation::Peer, config::PeerConfig, handle::{PeerSink, PeerSource}},
-        stream::vsock::{VsockTarget, general::{VListener, VStream}},
-    },
+use testschema::echo_capnp::echo;
+use ogurpchik::auth::handshake::{HandshakeMode, authenticate_client, authenticate_server};
+use ogurpchik::net::{Conn, Listener};
+use ogurpchik::rpc::{RpcSession, Side, spawn_session};
+use capnp::capability::Rc;
+
+pub struct EchoImpl;
+
+impl echo::Server for EchoImpl {
+    async fn ping(
+        self: Rc<Self>,
+        params: echo::PingParams,
+        mut results: echo::PingResults,
+    ) -> Result<(), capnp::Error> {
+        let msg = params.get()?.get_msg()?;
+        results.get().set_reply(msg.to_str()?.to_string());
+        Ok(())
+    }
+}
+
+pub const TRANSPORTS: &[&str] = if cfg!(windows) {
+    &["tcp", "uds", "npipe"]
+} else {
+    &["tcp", "uds"]
 };
-use rkyv::{Archive, Deserialize, Serialize};
-use ogurpchik::codecs::rkyv_protocol::AlignedBuffer;
-use ogurpchik::transport::base::MessageSource;
-use ogurpchik::transport::stream::AsyncStream;
 
-#[derive(
-    Archive, Deserialize, Serialize, Debug, PartialEq, Clone,
-    serde::Deserialize, serde::Serialize,
-)]
-#[rkyv(compare(PartialEq), derive(Debug, PartialEq, Eq))]
-pub enum PingRequest { Ping }
+/// Binds a listener for `kind` and returns it together with a closure that
+/// produces a connected client `Conn` on each call... not quite: named
+/// pipes need the name, tcp needs the bound port, so this returns the
+/// listener and an `Endpoint`-ish connector closure.
+pub async fn bind(kind: &str) -> (Listener, Box<dyn Fn() -> ConnConnect>) {
+    match kind {
+        "tcp" => {
+            let listener = Listener::bind_tcp("127.0.0.1:0".parse().unwrap())
+                .await
+                .expect("bind failed");
+            let Listener::Tcp(inner) = &listener else {
+                unreachable!()
+            };
+            let addr = inner.local_addr().unwrap();
+            (listener, Box::new(move || ConnConnect::Tcp(addr)))
+        }
+        "uds" => {
+            let path = std::env::temp_dir().join(format!(
+                "ogurpchik-bench-{kind}-{}.sock",
+                std::process::id()
+            ));
+            let listener = Listener::bind_uds(&path).await.expect("bind failed");
+            (listener, Box::new(move || ConnConnect::Uds(path.clone())))
+        }
+        #[cfg(windows)]
+        "npipe" => {
+            let name = format!("ogurpchik-bench-{}", std::process::id());
+            let listener = Listener::bind_npipe(&name).await.expect("bind failed");
+            (listener, Box::new(move || ConnConnect::Npipe(name.clone())))
+        }
+        other => panic!("unknown transport {other}"),
+    }
+}
 
-#[derive(
-    Archive, Deserialize, Serialize, Debug, PartialEq, Clone,
-    serde::Deserialize, serde::Serialize,
-)]
-#[rkyv(compare(PartialEq), derive(Debug, PartialEq, Eq))]
-pub enum PongResponse { Pong }
+pub enum ConnConnect {
+    Tcp(std::net::SocketAddr),
+    Uds(std::path::PathBuf),
+    #[cfg(windows)]
+    Npipe(String),
+}
 
-#[derive(Clone)]
-pub struct EchoHandler;
-
-impl ServiceHandler<RkyvCodec<PingRequest, PongResponse>> for EchoHandler {
-    async fn on_request<'a>(&self, req: &ArchivedPingRequest) -> anyhow::Result<PongResponse> {
-        match req {
-            ArchivedPingRequest::Ping => Ok(PongResponse::Pong),
+impl ConnConnect {
+    pub async fn connect(self) -> Conn {
+        match self {
+            Self::Tcp(addr) => Conn::connect_tcp(addr).await.expect("connect failed"),
+            Self::Uds(path) => Conn::connect_uds(&path).await.expect("connect failed"),
+            #[cfg(windows)]
+            Self::Npipe(name) => Conn::connect_npipe(&name).await.expect("connect failed"),
         }
     }
 }
 
-impl ServiceHandler<BitcodeCodec<PingRequest, PongResponse>> for EchoHandler {
-    async fn on_request<'a>(&self, req: PingRequest) -> anyhow::Result<PongResponse> {
-        Ok(PongResponse::Pong)
-    }
+/// Starts a serve-one task (accept → hmac handshake → spawn Echo
+/// session, held until the peer disconnects) on the current runtime.
+pub fn spawn_server(listener: Listener) {
+    compio::runtime::spawn(async move {
+        let mut conn = listener.accept().await.expect("accept failed");
+        authenticate_server(&mut conn, &HandshakeMode::hmac(b"bench".to_vec()))
+            .await
+            .expect("server handshake failed");
+        let session = spawn_session::<echo::Client, _>(conn, Side::Server, EchoImpl);
+        let _ = session.wait().await;
+    })
+    .detach();
 }
 
-pub type RkyvClient = Client<
-    RkyvCodec<PingRequest, PongResponse>,
-    AlignedBuffer,
-    BufGuard<AlignedBuffer, SharedAllocator<AlignedBuffer>>,
->;
-
-pub type BitcodeClient<T> = Client<
-    BitcodeCodec<PingRequest, PongResponse>,
-    <BitcodeCodec<PingRequest, PongResponse> as MessageCodec>::Dest,
-    <T as TransportBuilder<
-        <BitcodeCodec<PingRequest, PongResponse> as MessageCodec>::Dest
-    >>::Rx,
->;
-
-
-pub fn run_block<F, T>(f: F) -> T
-where
-    F: std::future::Future<Output = T>,
-{
-    compio::runtime::Runtime::new()
-        .expect("failed to create compio runtime")
-        .block_on(f)
-}
-
-type RkyvDest = AlignedBuffer;
-
-type BitcodeDest = VecBuf;
-
-pub async fn make_rkyv_node<T>(
-    transport: T,
-) -> (RkyvClient, Option<ServiceRegistration>)
-where
-    T: TransportBuilder<RkyvDest, Rx = BufGuard<RkyvDest, SharedAllocator<RkyvDest>>> + Clone + 'static,
-    <T as TransportBuilder<AlignedBuffer>>::Rx: ReleasableBuf,
-    RkyvDest: OwnedBuf + HasAllocator,
-{
-    Node::new()
-        .expect("Node::new failed")
-        .serve::<RkyvCodec<PingRequest, PongResponse>, _, _>(
-            transport.clone(),
-            EchoHandler,
-        )
-        .connect::<RkyvCodec<PingRequest, PongResponse>, _>(transport)
-        .start()
+/// Connects a client and returns its live RPC session.
+pub async fn client_session(connect: ConnConnect) -> RpcSession<echo::Client> {
+    let mut conn = connect.connect().await;
+    authenticate_client(&mut conn, &HandshakeMode::hmac(b"bench".to_vec()))
         .await
-        .expect("Node start failed")
+        .expect("client handshake failed");
+    spawn_session(conn, Side::Client, EchoImpl)
 }
 
-pub async fn make_bitcode_node<T>(
-    transport: T,
-) -> (BitcodeClient<T>, Option<ServiceRegistration>)
-where
-    T: TransportBuilder<BitcodeDest> + Clone + 'static,
-    T::Rx: ReleasableBuf,
-    BitcodeDest: OwnedBuf + HasAllocator,
-{
-    Node::new()
-        .expect("Node::new failed")
-        .serve::<BitcodeCodec<PingRequest, PongResponse>, _, _>(
-            transport.clone(),
-            EchoHandler,
-        )
-        .connect::<BitcodeCodec<PingRequest, PongResponse>, _>(transport)
-        .start()
-        .await
-        .expect("Node start failed")
-}
-
-
-pub type PeerTx = PeerSink<VecBuf>;
-pub type PeerRx = PeerSource<BufGuard<VecBuf, SharedAllocator<VecBuf>>>;
-
-pub async fn make_vsock_peer_pair(port: u32) -> (PeerTx, PeerRx) {
-    let (srv, cli) = vsock_pair(port).await;
-    let (tx, _) = make_peer(srv);
-    let (_, rx) = make_peer(cli);
-    (tx, rx)
-}
-
-pub async fn make_vsock_peer_pair_full(port: u32) -> ((PeerTx, PeerRx), (PeerTx, PeerRx), u32) {
-    let (srv, cli) = vsock_pair(port).await;
-    let (s_tx, s_rx) = make_peer(srv);
-    let (c_tx, c_rx) = make_peer(cli);
-    ((s_tx, s_rx), (c_tx, c_rx), port)
-}
-
-pub async fn send_recv_n(mut tx: PeerTx, rx: &mut PeerRx, n: usize, msg_size: usize) {
-    let sender = compio::runtime::spawn(async move {
-        for _ in 0..n {
-            tx.send(vec![0xABu8; msg_size].into()).await.unwrap();
-        }
-    });
-    for _ in 0..n {
-        std::hint::black_box(rx.recv().await.unwrap());
-    }
-    sender.await.unwrap();
-}
-
-async fn vsock_pair(port: u32) -> (VStream, VStream) {
-    let listener = VListener::bind_loopback(port).expect("vsock bind failed");
-    let h = compio::runtime::spawn(async move {
-        listener.accept().await.expect("vsock accept failed")
-    });
-    let cli = VStream::connect(VsockTarget::Cid(0), port)
-        .await
-        .expect("vsock connect failed");
-    let (srv, _) = h.await.unwrap();
-    (srv, cli)
-}
-
-pub async fn make_tcp_peer_pair() -> (PeerTx, PeerRx) {
-    use compio::net::{TcpListener, TcpStream};
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("tcp bind failed");
-    let addr = listener.local_addr().expect("local_addr failed");
-    let h = compio::runtime::spawn(async move {
-        listener.accept().await.expect("tcp accept failed")
-    });
-    let cli = TcpStream::connect(addr).await.expect("tcp connect failed");
-    let (srv, _) = h.await.unwrap();
-    let (tx, _) = make_peer(srv);
-    let (_, rx) = make_peer(cli);
-    (tx, rx)
-}
-
-pub type AlignedPeerTx = PeerSink<AlignedBuffer>;
-pub type AlignedPeerRx = PeerSource<BufGuard<AlignedBuffer, SharedAllocator<AlignedBuffer>>>;
-
-pub async fn make_uds_aligned_full(path: &PathBuf)
-                                   -> (AlignedPeerTx, AlignedPeerRx, AlignedPeerTx, AlignedPeerRx)
-{
-    let _ = std::fs::remove_file(path);
-    let listener = UnixListener::bind(path).await.unwrap();
-    let h = compio::runtime::spawn(async move {
-        listener.accept().await.unwrap()
-    });
-    let cli = UnixStream::connect(path).await.unwrap();
-    let (srv, _) = h.await.unwrap();
-
-    let tx: TpcAllocator<AlignedBuffer>    = BufferAllocator::get(&PoolConfig::default());
-    let rx: SharedAllocator<AlignedBuffer> = BufferAllocator::get(&PoolConfig::default());
-
-    let (srv_tx, srv_rx) = Peer::new(srv, PeerConfig::default(), tx.clone(), rx.clone()).unwrap();
-    let (cli_tx, cli_rx) = Peer::new(cli, PeerConfig::default(), tx, rx).unwrap();
-    (srv_tx, srv_rx, cli_tx, cli_rx)
-}
-
-
-pub async fn make_uds_peer_pair(path: &std::path::PathBuf) -> (PeerTx, PeerRx) {
-    use compio::net::{UnixListener, UnixStream};
-    let _ = std::fs::remove_file(path);
-    let listener = UnixListener::bind(path).await.expect("uds bind failed");
-    let path2 = path.clone();
-    let h = compio::runtime::spawn(async move {
-        listener.accept().await.expect("uds accept failed")
-    });
-    let cli = UnixStream::connect(&path2).await.expect("uds connect failed");
-    let (srv, _) = h.await.unwrap();
-    let (tx, _) = make_peer(srv);
-    let (_, rx) = make_peer(cli);
-    (tx, rx)
-}
-
-fn make_peer(
-    stream: impl AsyncStream + Clone + 'static,
-) -> (PeerTx, PeerRx) {
-    let tx: TpcAllocator<VecBuf>    = BufferAllocator::get(&PoolConfig::default());
-    let rx: SharedAllocator<VecBuf> = BufferAllocator::get(&PoolConfig::default());
-    Peer::new(stream, PeerConfig::default(), tx, rx).unwrap()
+pub async fn ping(session: &RpcSession<echo::Client>) {
+    let mut req = session.remote().ping_request();
+    req.get().set_msg("ping");
+    req.send().promise.await.expect("ping failed");
 }

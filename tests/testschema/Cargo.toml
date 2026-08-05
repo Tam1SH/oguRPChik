@@ -1,0 +1,17 @@
+[package]
+name    = "testschema"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Test-only echo schema for ogurpchik's unit/integration tests and benches.
+# The framework itself is schema-agnostic: concrete .capnp contracts are
+# the application's business, compiled in the application's own crate
+# exactly like this one does.
+
+[dependencies]
+capnp     = "0.27"
+capnp-rpc = "0.27"
+
+[build-dependencies]
+capnpc = "0.27"

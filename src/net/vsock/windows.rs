@@ -2,7 +2,7 @@ use crate::net::vsock::VsockTarget;
 use crate::net::vsock::utils::uuid_to_guid;
 use compio::BufResult;
 use compio::buf::{IntoInner, IoBuf, IoBufMut};
-use compio::driver::op::{Accept, Connect, Recv, Send};
+use compio::driver::op::{Accept, Connect, Recv, Send, BufResultExt};
 use compio::driver::{AsFd, BorrowedFd};
 use compio::io::{AsyncRead, AsyncWrite};
 use compio::runtime::{Attacher, submit};
@@ -82,7 +82,8 @@ impl AsFd for HvHandle {
 impl AsyncRead for HvStream {
     async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
         let op = Recv::new(HvHandle(self.inner.clone()), buf, 0);
-        submit(op).await.map_buffer(|op| op.into_inner())
+        let res = submit(op).await.into_inner();
+        unsafe { res.map_advanced() }
     }
 }
 

@@ -845,7 +845,6 @@ dependencies = [
  "binrw",
  "capnp",
  "capnp-rpc",
- "capnpc",
  "compio",
  "ed25519-dalek",
  "error-stack",
@@ -858,6 +857,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "socket2",
+ "testschema",
  "tracing",
  "uuid",
  "widestring",
@@ -1280,6 +1280,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "de0208d3660701622272151bc63c35f5d32ca3d45c19785a9a8dc04dc797dc43"
 dependencies = [
  "futures-util",
+]
+
+[[package]]
+name = "testschema"
+version = "0.1.0"
+dependencies = [
+ "capnp",
+ "capnp-rpc",
+ "capnpc",
 ]
 
 [[package]]

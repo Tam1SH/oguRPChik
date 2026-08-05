@@ -252,6 +252,11 @@ pub async fn authenticate_client(conn: &mut Conn, mode: &HandshakeMode) -> Resul
     }
 
     let hello_body = read_packet_with_timeout(conn).await?;
+    // The server may reject the connection outright (e.g. a one-to-one gate
+    // that already has a session) instead of opening with `Hello`.
+    if hello_body.first() == Some(&TAG_ACK) {
+        return decode_ack(&hello_body);
+    }
     let (server_version, scheme, nonce) = decode_hello(&hello_body)?;
 
     if server_version != HANDSHAKE_VERSION {

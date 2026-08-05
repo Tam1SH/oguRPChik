@@ -30,38 +30,43 @@ However, let's be honest: I did not extract it into a separate library for "bett
 
 | Path | What |
 |------|------|
-| `schema/` | `agent.capnp` (host↔VM), `plugin.capnp` (host↔plugin) — the contract |
 | `src/net/` | `Conn`/`Listener` runtime enum over vsock/uds/npipe/tcp + `peer_identity()` |
 | `src/auth/` | handshake on the raw `Conn` (exact reads, before capnp starts) + signed-process |
 | `src/rpc.rs` | `Conn` → `AsyncStream` → `VatNetwork` → `RpcSystem` bridge |
 | `src/endpoint.rs` | the discovery convention + connect-with-backoff readiness |
 | `src/error/` | `error-stack` contexts per layer + capnp exception boundary |
 
+The crate is **schema-agnostic**: your `.capnp` contracts are your
+application's business — compile them in your own crate with `capnpc`
+(exactly like `tests/testschema/` does here) and hand the generated
+bootstrap capability to `spawn_session`.
+
 ## 🛠 Build requirements
 
-Schema codegen shells out to the **external C++ `capnp` binary** — there is
-no pure-Rust equivalent. Install it (`winget install capnproto.capnproto`,
-`apt install capnproto`, `brew install capnp`, ...) before building; this
-applies to plugin authors too. If `-> stream` methods fail to compile, point
-`CAPNP_INCLUDE_DIR` at the directory containing `capnp/stream.capnp`
-(usually `<capnp-dist>/include` or `<capnp-src>/src`).
+The library itself needs only a Rust toolchain. Compiling **your** schemas
+shells out to the external C++ `capnp` binary (no pure-Rust equivalent
+exists) — install it (`winget install capnproto.capnproto`,
+`apt install capnproto`, `brew install capnp`, ...) in your project's
+build environment; this applies to plugin authors too. If `-> stream`
+methods fail to compile, point `CAPNP_INCLUDE_DIR` at the directory
+containing `capnp/stream.capnp`.
 
 ## 📖 Usage sketch
 
 ```rust
-use ogurpchik::agent_capnp::agent_control;
 use ogurpchik::auth::handshake::{HandshakeMode, authenticate_client, authenticate_server};
 use ogurpchik::endpoint::Endpoint;
 use ogurpchik::rpc::{Side, spawn_session};
+use my_app_schema::my_interface; // your crate, your .capnp
 
 // Server side (agent in the VM):
 let listener = Endpoint::vsock_to_host(AGENT_PORT).listen().await?;
 let mut conn = listener.accept().await?;
 authenticate_server(&mut conn, &HandshakeMode::hmac(b"shared-secret".to_vec())).await?;
-let session = spawn_session::<agent_control::Client, _>(conn, Side::Server, MyAgentImpl);
+let session = spawn_session::<my_interface::Client, _>(conn, Side::Server, MyImpl);
 
 // Client side (host): same steps with authenticate_client + Side::Client,
-// then `session.remote()` is the agent's bootstrap capability.
+// then `session.remote()` is the server's bootstrap capability.
 let reply = session.remote().ping_request().send().promise.await?;
 ```
 
