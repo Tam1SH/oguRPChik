@@ -1479,6 +1479,7 @@ dependencies = [
  "oneshot",
  "rkyv",
  "rustc-hash 2.1.1",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",

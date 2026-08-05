@@ -58,11 +58,15 @@ windows = { version = "0.61.3", features = [
     "Win32_Foundation",
     "Win32_System_Performance",
     "Win32_NetworkManagement", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis",
-    "Win32_Networking_WinSock", "Win32_System_Threading", "Win32_System_Hypervisor", "Win32_System_Registry"] }
+    "Win32_Networking_WinSock", "Win32_System_Threading", "Win32_System_Hypervisor", "Win32_System_Registry",
+    "Win32_System_Pipes"] }
 
 winreg = "0.55.0"
 widestring = "1.2.1"
 winapi = { version = "0.3.9", features = ["libloaderapi", "combaseapi", "minwindef", "ntdef"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1.1", features = ["net"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "1.0.0-alpha.2"

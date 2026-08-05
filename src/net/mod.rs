@@ -11,6 +11,7 @@
 
 pub mod conn;
 pub mod listener;
+#[cfg(windows)]
 mod npipe;
 pub mod vsock;
 

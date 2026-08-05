@@ -116,16 +116,54 @@ impl Conn {
     /// from OS-level facilities:
     ///
     /// - `npipe` (Windows): `GetNamedPipeClientProcessId` on the accepted
-    ///   pipe handle.
+    ///   (server-side) pipe handle. The client side has no pipe-API way to
+    ///   learn the server's PID and gets `Unknown`.
     /// - `uds` (Linux): `SO_PEERCRED`.
-    /// - `uds` (Windows), `vsock`, `tcp`: no peer-credential facility exists,
-    ///   so this is `Unknown`.
+    /// - `uds` (Windows and non-Linux unix), `vsock`, `tcp`: no
+    ///   peer-credential facility exists, so this is `Unknown`.
     ///
+    /// A failed OS call also yields `Unknown` rather than an error: this is
+    /// a best-effort probe, and the caller's decision ("can I even attempt
+    /// signed-process auth on this connection?") is the same either way.
     /// See `crate::auth::handshake` for why this distinction — not the wire
-    /// protocol — decides whether signed-process auth is even attemptable on
-    /// a given connection. (Implemented in stage 3.)
+    /// protocol — decides whether signed-process auth is attemptable.
     pub fn peer_identity(&self) -> PeerIdentity {
-        PeerIdentity::Unknown
+        match self {
+            #[cfg(windows)]
+            Self::Npipe(NamedPipeStream::Server(server)) => npipe_client_pid(server),
+            #[cfg(target_os = "linux")]
+            Self::Uds(stream) => linux_uds_peer_pid(stream),
+            _ => PeerIdentity::Unknown,
+        }
+    }
+}
+
+/// Windows: PID of the client process on the other end of an accepted pipe.
+#[cfg(windows)]
+fn npipe_client_pid(server: &compio::fs::named_pipe::NamedPipeServer) -> PeerIdentity {
+    use compio::driver::AsRawFd;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Pipes::GetNamedPipeClientProcessId;
+
+    let mut pid = 0u32;
+    // SAFETY: the handle is borrowed from the live pipe server for the
+    // duration of the call; `pid` is a valid out-pointer.
+    match unsafe { GetNamedPipeClientProcessId(HANDLE(server.as_raw_fd() as _), &mut pid) } {
+        Ok(()) => PeerIdentity::Pid { pid },
+        Err(_) => PeerIdentity::Unknown,
+    }
+}
+
+/// Linux: PID of the peer of a unix-domain socket via `SO_PEERCRED`.
+#[cfg(target_os = "linux")]
+fn linux_uds_peer_pid(stream: &UnixStream) -> PeerIdentity {
+    use std::os::fd::AsFd;
+
+    match rustix::net::sockopt::socket_peercred(stream.as_fd()) {
+        Ok(cred) => PeerIdentity::Pid {
+            pid: cred.pid.as_raw_pid() as u32,
+        },
+        Err(_) => PeerIdentity::Unknown,
     }
 }
 
@@ -170,5 +208,87 @@ impl AsyncWrite for Conn {
             Self::Npipe(s) => s.shutdown().await,
             Self::Vsock(s) => s.shutdown().await,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::net::Listener;
+
+    /// Windows named pipe, server side: the OS must report the client
+    /// process's PID. The client here is this very test process, so the
+    /// reported PID must equal ours — this is also the property the
+    /// signed-process handshake relies on (PID from the OS, not the wire).
+    #[cfg(windows)]
+    #[compio::test]
+    async fn npipe_server_peer_identity_is_os_reported_client_pid() {
+        let name = format!("ogurpchik-peerid-test-{}", std::process::id());
+
+        let listener = Listener::bind_npipe(&name).await.expect("bind failed");
+        let accept = listener.accept();
+        let connect = Conn::connect_npipe(&name);
+        let (server, client) = futures::try_join!(accept, connect).expect("join failed");
+
+        match server.peer_identity() {
+            PeerIdentity::Pid { pid } => assert_eq!(pid, std::process::id()),
+            PeerIdentity::Unknown => panic!("npipe server must see the client PID"),
+        }
+        // The client end has no pipe-API way to learn the server's PID.
+        assert!(matches!(client.peer_identity(), PeerIdentity::Unknown));
+    }
+
+    /// Linux unix-domain socket: `SO_PEERCRED` must report the peer's PID —
+    /// again this process, since client and server are the same test.
+    #[cfg(target_os = "linux")]
+    #[compio::test]
+    async fn uds_peer_identity_is_os_reported_peer_pid() {
+        let path = std::env::temp_dir().join(format!("ogurpchik-peerid-test-{}.sock", std::process::id()));
+
+        let listener = Listener::bind_uds(&path).await.expect("bind failed");
+        let accept = listener.accept();
+        let connect = Conn::connect_uds(&path);
+        let (server, _client) = futures::try_join!(accept, connect).expect("join failed");
+
+        match server.peer_identity() {
+            PeerIdentity::Pid { pid } => assert_eq!(pid, std::process::id()),
+            PeerIdentity::Unknown => panic!("uds on Linux must see the peer PID"),
+        }
+    }
+
+    /// Transports without a peer-credential facility report `Unknown` —
+    /// never a guess, never wire-derived data.
+    #[compio::test]
+    async fn tcp_peer_identity_is_unknown() {
+        let listener = Listener::bind_tcp("127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind failed");
+        let Listener::Tcp(inner) = &listener else {
+            unreachable!()
+        };
+        let addr = inner.local_addr().expect("local_addr failed");
+
+        let accept = listener.accept();
+        let connect = Conn::connect_tcp(addr);
+        let (server, client) = futures::try_join!(accept, connect).expect("join failed");
+
+        assert!(matches!(server.peer_identity(), PeerIdentity::Unknown));
+        assert!(matches!(client.peer_identity(), PeerIdentity::Unknown));
+    }
+
+    /// uds on Windows has no peer-credential facility (Windows AF_UNIX does
+    /// not expose peer credentials), hence `Unknown` — which is exactly why
+    /// npipe stays the default plugin transport on Windows.
+    #[cfg(windows)]
+    #[compio::test]
+    async fn uds_peer_identity_is_unknown_on_windows() {
+        let path = std::env::temp_dir().join(format!("ogurpchik-peerid-test-{}.sock", std::process::id()));
+
+        let listener = Listener::bind_uds(&path).await.expect("bind failed");
+        let accept = listener.accept();
+        let connect = Conn::connect_uds(&path);
+        let (server, _client) = futures::try_join!(accept, connect).expect("join failed");
+
+        assert!(matches!(server.peer_identity(), PeerIdentity::Unknown));
     }
 }

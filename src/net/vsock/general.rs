@@ -140,6 +140,9 @@ impl VListener {
         }
         #[cfg(unix)]
         {
+            // Linux vsock binds VMADDR_CID_ANY regardless; `target` only
+            // has meaning on the Windows (Hyper-V socket) side.
+            let _ = target;
             Ok(Self::Vsock(
                 crate::net::vsock::linux::VsockListener::bind(port)?,
             ))
