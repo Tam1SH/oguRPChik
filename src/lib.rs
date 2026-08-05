@@ -6,6 +6,7 @@ pub mod discovery;
 pub mod error;
 pub mod net;
 pub mod pool;
+pub mod rpc;
 pub mod transport;
 
 /// Generated from `schema/agent.capnp` by `build.rs` (`capnpc`) — do not
