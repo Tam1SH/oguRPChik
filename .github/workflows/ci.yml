@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+# Cancels a stale run when new commits land on the same branch/PR - avoids
+# burning CI minutes on a build for a diff that's already been superseded.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Windows is this crate's primary target: named pipes, Hyper-V vsock and
+  # the WinTrust-backed `signed_process` attestation only exist here, and
+  # they're the bulk of both the code and the test suite. Full build + test.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # `capnpc` shells out to a `capnp` binary that isn't on any runner
+      # image. Needed even though the crate itself ships no schema: the
+      # dev-dependency `tests/testschema` compiles `schema/echo.capnp` in
+      # its build.rs, so anything that builds test targets needs it.
+      # Version pinned deliberately: an unpinned `choco install` follows
+      # whatever is newest, so a green build could turn red without a single
+      # commit having changed.
+      - name: Install Cap'n Proto
+        run: choco install capnproto --version=1.3.0 -y --no-progress
+
+      - name: Build
+        run: cargo build --all-targets
+
+      - name: Test
+        run: cargo test
+
+  # Linux gets compile-only gating. The crate does carry real Linux code
+  # (AF_VSOCK via rustix, UDS), so letting it rot silently would be bad -
+  # but the runtime tests can't be trusted here: `vsock_loopback_full_stack`
+  # and the vsock unit tests open AF_VSOCK sockets, which need a
+  # `vsock_loopback`/`vhost_vsock` module that GitHub's Linux runners don't
+  # guarantee. Rather than delete those tests or mark them allowed-to-fail,
+  # this job asserts the Linux cfg branches still compile and leaves the
+  # behavioural gate to the Windows job.
+  linux-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Cap'n Proto
+        run: sudo apt-get update && sudo apt-get install -y capnproto
+
+      - name: Check
+        run: cargo check --all-targets
