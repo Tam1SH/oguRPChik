@@ -29,7 +29,11 @@ pub(crate) fn verify_signed_file(image_path: &Path, public_key: &[u8]) -> Result
     let image_bytes = fs::read(image_path)
         .change_context(HandshakeError::SignedProcessVerificationFailed)
         .attach(format!("failed to read signed image {}", image_path.display()))?;
-    let signature = read_signature(&signature_path)?;
+
+    let Some(signature) = read_signature(&signature_path)? else {
+        return on_missing_signature(image_path, &signature_path);
+    };
+
     verifying_key
         .verify(&image_bytes, &signature)
         .map_err(|e| {
@@ -37,6 +41,35 @@ pub(crate) fn verify_signed_file(image_path: &Path, public_key: &[u8]) -> Result
                 .attach(format!("signature verification failed: {e}"))
         })?;
     Ok(())
+}
+
+/// An *absent* signature is tolerated in debug builds so a freshly rebuilt,
+/// unsigned binary can still connect during development - re-signing after
+/// every `cargo build` is not a workable inner loop.
+///
+/// Deliberately narrow: this covers only a missing file. A signature that is
+/// present but does not verify stays fatal in every profile, so the relaxed
+/// mode can never mask a real mismatch or a tampered image.
+///
+/// The switch is `debug_assertions` on *this crate*, which follows the profile
+/// of the binary that links it: an agent built with `--release` always
+/// enforces, and nothing at runtime can flip that.
+#[cfg(all(windows, debug_assertions))]
+fn on_missing_signature(image_path: &Path, signature_path: &Path) -> Result<(), HandshakeError> {
+    tracing::warn!(
+        image = %image_path.display(),
+        signature = %signature_path.display(),
+        "signed-process: no signature file; accepting the peer because this is a debug build - \
+         a release build rejects it"
+    );
+    Ok(())
+}
+
+#[cfg(all(windows, not(debug_assertions)))]
+fn on_missing_signature(image_path: &Path, signature_path: &Path) -> Result<(), HandshakeError> {
+    Err(Report::new(HandshakeError::SignedProcessVerificationFailed)
+        .attach(format!("no signature at {}", signature_path.display()))
+        .attach(format!("for image {}", image_path.display())))
 }
 
 #[cfg(windows)]
@@ -61,20 +94,30 @@ fn parse_verifying_key(public_key: &[u8]) -> Result<VerifyingKey, HandshakeError
     VerifyingKey::from_bytes(&key_bytes).change_context(HandshakeError::SignedProcessVerificationFailed)
 }
 
+/// `Ok(None)` means the file is simply not there - the one case
+/// [`on_missing_signature`] is allowed to wave through. Every other read
+/// failure stays an error, so an unreadable or corrupt signature is never
+/// mistaken for an unsigned dev build.
 #[cfg(windows)]
-fn read_signature(path: &Path) -> Result<Signature, HandshakeError> {
-    let raw = match fs::read_to_string(path) {
-        Ok(text) => match base64::engine::general_purpose::STANDARD.decode(text.trim()) {
-            Ok(decoded) => decoded,
-            Err(_) => fs::read(path)
-                .change_context(HandshakeError::SignedProcessVerificationFailed)
-                .attach(format!("failed to read signature {}", path.display()))?,
-        },
-        Err(_) => fs::read(path)
-            .change_context(HandshakeError::SignedProcessVerificationFailed)
-            .attach(format!("failed to read signature {}", path.display()))?,
+fn read_signature(path: &Path) -> Result<Option<Signature>, HandshakeError> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(Report::new(HandshakeError::SignedProcessVerificationFailed)
+                .attach(format!("failed to read signature {}: {e}", path.display())));
+        }
     };
-    Signature::from_slice(&raw).change_context(HandshakeError::SignedProcessVerificationFailed)
+
+    // Written either base64-encoded or as the raw 64 signature bytes.
+    let raw = std::str::from_utf8(&bytes)
+        .ok()
+        .and_then(|text| base64::engine::general_purpose::STANDARD.decode(text.trim()).ok())
+        .unwrap_or(bytes);
+
+    Signature::from_slice(&raw)
+        .change_context(HandshakeError::SignedProcessVerificationFailed)
+        .map(Some)
 }
 
 #[cfg(windows)]
@@ -119,6 +162,50 @@ mod tests {
 
         verify_signed_file(&image_path, &signing_key.verifying_key().to_bytes())
             .expect("signature should verify");
+
+        let _ = fs::remove_file(&image_path);
+        let _ = fs::remove_file(&sig_path);
+    }
+
+    /// The dev relaxation: an unsigned binary is let through in debug builds
+    /// only. Same call must fail in release, which is what the `cfg` asserts.
+    #[test]
+    fn missing_signature_is_accepted_only_in_debug_builds() {
+        let image_path = temp_file_path("unsigned-process.exe");
+        fs::write(&image_path, b"freshly rebuilt, never signed").expect("write image");
+        let public_key = SigningKey::from_bytes(&[7u8; 32]).verifying_key().to_bytes();
+
+        let result = verify_signed_file(&image_path, &public_key);
+
+        if cfg!(debug_assertions) {
+            result.expect("a debug build must accept a missing signature");
+        } else {
+            result.expect_err("a release build must reject a missing signature");
+        }
+
+        let _ = fs::remove_file(&image_path);
+    }
+
+    /// The relaxation must not widen past "file absent": a signature that is
+    /// present but wrong stays fatal even in a debug build, or dev mode would
+    /// silently hide a genuine mismatch.
+    #[test]
+    fn present_but_invalid_signature_is_rejected_in_every_profile() {
+        let image_path = temp_file_path("tampered-process.exe");
+        let sig_path = PathBuf::from(format!("{}.sig", image_path.display()));
+        let signing_key = SigningKey::from_bytes(&[7u8; 32]);
+        // A valid signature over *different* bytes - structurally fine, wrong image.
+        let signature = signing_key.sign(b"some other binary");
+
+        fs::write(&image_path, b"the actual binary").expect("write image");
+        fs::write(
+            &sig_path,
+            base64::engine::general_purpose::STANDARD.encode(signature.to_bytes()),
+        )
+        .expect("write signature");
+
+        verify_signed_file(&image_path, &signing_key.verifying_key().to_bytes())
+            .expect_err("a mismatched signature must be rejected");
 
         let _ = fs::remove_file(&image_path);
         let _ = fs::remove_file(&sig_path);
