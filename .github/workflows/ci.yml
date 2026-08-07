@@ -19,7 +19,7 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -52,13 +52,18 @@ jobs:
   linux-check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
 
       - name: Install Cap'n Proto
+      # Version is left to the runner image on purpose. Pinning an exact apt
+      # version is brittle - the pinned package disappears from the archive
+      # the moment Ubuntu publishes a security update, and the job starts
+      # failing with no commit behind it. The Windows jobs pin because choco
+      # keeps old versions around; apt does not.
         run: sudo apt-get update && sudo apt-get install -y capnproto
 
       - name: Check
