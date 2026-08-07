@@ -42,7 +42,9 @@ windows = { version = "0.61.3", features = [
     "Win32_Networking_WinSock",
     "Win32_System_Threading",
     "Win32_System_Hypervisor",
-    "Win32_System_Pipes"] }
+    "Win32_System_Pipes",
+    "Win32_Security",
+    "Win32_Security_Authorization"] }
 
 # net/vsock/utils.rs loads vmcompute.dll dynamically and falls back to a
 # registry lookup for the WSL VM id — pre-`windows`-crate idioms kept from

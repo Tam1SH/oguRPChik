@@ -77,11 +77,252 @@ pub struct NamedPipeAcceptor {
     current: Arc<Mutex<NamedPipeServer>>,
 }
 
+/// Security descriptor applied to every pipe instance we create.
+///
+/// A privileged server (an agent that controls processes or services must run
+/// elevated) otherwise produces a pipe that its own unprivileged client cannot
+/// open at all. Two separate things block it, and both are handled here:
+///
+/// - `D:` - SYSTEM, Administrators and the account running the server get full
+///   control; authenticated users get only read/write, which is what
+///   `CreateFile` on the client side needs. They deliberately do *not* get
+///   `GA`: full control carries `FILE_CREATE_PIPE_INSTANCE`, which would let
+///   any local user stand up another instance of the same pipe and intercept
+///   connections meant for the real server.
+///
+///   The server's own account has to be named explicitly (`{sid}` below). Being
+///   the object's owner is not enough - implicit owner rights are only
+///   `READ_CONTROL | WRITE_DAC`, not instance creation - so an unelevated
+///   server would otherwise match nothing but the `AU` ACE and fail to open its
+///   second pipe instance.
+/// - `S:(ML;;NW;;;ME)` - the mandatory label. This is the part that actually
+///   bites: a kernel object inherits its creator's integrity level, and the
+///   default `no-write-up` policy denies a medium-integrity client the write
+///   access a pipe connection requires. Lowering the label to medium is what
+///   lets a normal desktop app connect to an elevated agent.
+///
+/// Widening the DACL moves the security boundary onto the handshake, which is
+/// why a server exposing anything privileged should not be run with
+/// `HandshakeMode::version_only`.
+#[cfg(windows)]
+/// File rights (`FA`/`FRFW`), not generic ones (`GA`/`GRGW`): a pipe is a
+/// file-like object, and generic bits placed in an ACL this way are stored
+/// verbatim rather than mapped to concrete rights, so an access check for
+/// `FILE_CREATE_PIPE_INSTANCE` never matches them.
+const PIPE_SDDL_TEMPLATE: &str = "D:(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;{sid})(A;;FRFW;;;AU)S:(ML;;NW;;;ME)";
+
+/// SID of the account this process runs as, in SDDL string form.
+#[cfg(windows)]
+fn current_user_sid() -> io::Result<String> {
+    use windows::Win32::Foundation::{HANDLE, LocalFree};
+    use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
+    use windows::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    let mut token = HANDLE::default();
+    // SAFETY: `GetCurrentProcess` returns a pseudo-handle that needs no close;
+    // `token` is a valid out-pointer.
+    unsafe {
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)
+            .map_err(|e| io::Error::other(format!("failed to open the process token: {e}")))?;
+    }
+    let _token_guard = HandleGuard(token);
+
+    // First call is the size probe; it is expected to fail with
+    // ERROR_INSUFFICIENT_BUFFER, so only `len` is of interest.
+    let mut len = 0u32;
+    // SAFETY: passing a null buffer with zero length is the documented way to
+    // ask for the required size.
+    unsafe {
+        let _ = GetTokenInformation(token, TokenUser, None, 0, &mut len);
+    }
+    if len == 0 {
+        return Err(io::Error::other("token user information reported zero size"));
+    }
+
+    let mut buffer = vec![0u8; len as usize];
+    // SAFETY: `buffer` is `len` bytes long, which is what the probe asked for.
+    unsafe {
+        GetTokenInformation(
+            token,
+            TokenUser,
+            Some(buffer.as_mut_ptr().cast()),
+            len,
+            &mut len,
+        )
+        .map_err(|e| io::Error::other(format!("failed to read the token user: {e}")))?;
+    }
+
+    // SAFETY: on success the buffer holds a TOKEN_USER whose SID points inside
+    // that same allocation, which is alive for the rest of this function.
+    let sid = unsafe { (*buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+
+    let mut raw = windows::core::PWSTR::null();
+    // SAFETY: `sid` is valid as above; on success the callee allocates the
+    // string with LocalAlloc, freed below.
+    unsafe {
+        ConvertSidToStringSidW(sid, &mut raw)
+            .map_err(|e| io::Error::other(format!("failed to stringify the user SID: {e}")))?;
+    }
+    // SAFETY: `raw` is a NUL-terminated wide string owned by us until LocalFree.
+    let text = unsafe { raw.to_string() }
+        .map_err(|e| io::Error::other(format!("user SID is not valid UTF-16: {e}")))?;
+    // SAFETY: `raw` came from ConvertSidToStringSidW and is unused afterwards.
+    unsafe {
+        let _ = LocalFree(Some(windows::Win32::Foundation::HLOCAL(raw.0.cast())));
+    }
+    Ok(text)
+}
+
+#[cfg(windows)]
+struct HandleGuard(windows::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl Drop for HandleGuard {
+    fn drop(&mut self) {
+        // SAFETY: the handle came from OpenProcessToken and is not used after
+        // this point.
+        unsafe {
+            let _ = windows::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
+}
+
+/// Applies [`PIPE_SDDL`] to an already-created pipe instance.
+///
+/// Done after creation rather than through `SECURITY_ATTRIBUTES` because that
+/// is the route `compio` supports: it hands out `write_dac`/`write_owner` on
+/// the open mode and expects `SetSecurityInfo` on the resulting handle.
+#[cfg(windows)]
+fn apply_pipe_security(server: &NamedPipeServer) -> io::Result<()> {
+    use compio::driver::AsRawFd;
+    use windows::Win32::Foundation::{HANDLE, LocalFree};
+    use windows::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1, SE_KERNEL_OBJECT,
+        SetSecurityInfo,
+    };
+    use windows::Win32::Security::{
+        ACL, DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, GetSecurityDescriptorSacl,
+        LABEL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+    };
+    use windows::core::HSTRING;
+
+    let sddl = HSTRING::from(PIPE_SDDL_TEMPLATE.replace("{sid}", &current_user_sid()?));
+    let mut descriptor = PSECURITY_DESCRIPTOR::default();
+
+    // SAFETY: `sddl` is a valid NUL-terminated wide string that outlives the
+    // call; `descriptor` is a valid out-pointer. On success the callee
+    // allocates with LocalAlloc, freed below.
+    unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            &sddl,
+            SDDL_REVISION_1,
+            &mut descriptor,
+            None,
+        )
+        .map_err(|e| io::Error::other(format!("failed to parse the pipe SDDL: {e}")))?;
+    }
+
+    let result = (|| -> io::Result<()> {
+        let mut dacl: *mut ACL = std::ptr::null_mut();
+        let mut dacl_present = false.into();
+        let mut defaulted = false.into();
+        // SAFETY: `descriptor` came from a successful conversion above; all
+        // out-pointers are valid for the duration of the call.
+        unsafe {
+            GetSecurityDescriptorDacl(descriptor, &mut dacl_present, &mut dacl, &mut defaulted)
+                .map_err(|e| io::Error::other(format!("failed to read the pipe DACL: {e}")))?;
+        }
+
+        let mut sacl: *mut ACL = std::ptr::null_mut();
+        let mut sacl_present = false.into();
+        // SAFETY: as above. The SACL here carries only the mandatory label.
+        unsafe {
+            GetSecurityDescriptorSacl(descriptor, &mut sacl_present, &mut sacl, &mut defaulted)
+                .map_err(|e| io::Error::other(format!("failed to read the pipe label: {e}")))?;
+        }
+
+        let handle = HANDLE(server.as_raw_fd() as _);
+
+        // Applied as two calls rather than one so a failure says which of the
+        // two it was - they need different rights (WRITE_DAC vs WRITE_OWNER)
+        // and fail for entirely different reasons.
+        // SAFETY: the handle is borrowed from the live pipe server, and the ACL
+        // pointer borrows from `descriptor`, which is still alive here.
+        let status = unsafe {
+            SetSecurityInfo(
+                handle,
+                SE_KERNEL_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                None,
+                None,
+                Some(dacl),
+                None,
+            )
+        };
+        if status.is_err() {
+            return Err(io::Error::other(format!(
+                "failed to set the pipe DACL: {}",
+                io::Error::from_raw_os_error(status.0 as i32)
+            )));
+        }
+
+        // SAFETY: as above; `sacl` carries only the mandatory label.
+        let status = unsafe {
+            SetSecurityInfo(
+                handle,
+                SE_KERNEL_OBJECT,
+                LABEL_SECURITY_INFORMATION,
+                None,
+                None,
+                None,
+                Some(sacl),
+            )
+        };
+        if status.is_err() {
+            return Err(io::Error::other(format!(
+                "failed to set the pipe integrity label: {}",
+                io::Error::from_raw_os_error(status.0 as i32)
+            )));
+        }
+        Ok(())
+    })();
+
+    // SAFETY: `descriptor` was allocated by the conversion call above and is
+    // not referenced past this point.
+    unsafe {
+        let _ = LocalFree(Some(std::mem::transmute::<
+            PSECURITY_DESCRIPTOR,
+            windows::Win32::Foundation::HLOCAL,
+        >(descriptor)));
+    }
+
+    result
+}
+
 impl NamedPipeAcceptor {
     fn create_server(path: &NamedPipePath, first_instance: bool) -> io::Result<NamedPipeServer> {
         let mut options = ServerOptions::new();
         options.first_pipe_instance(first_instance);
-        options.create(&path.0)
+
+        if !first_instance {
+            // Only the first instance carries the security work. The descriptor
+            // belongs to the pipe, not to an instance, so setting it once is
+            // enough - and asking for WRITE_DAC/WRITE_OWNER here would actively
+            // break things: those rights are also access-checked against the
+            // existing pipe when opening a further instance, and that check
+            // fails, so every `accept` after the first would die with
+            // ERROR_ACCESS_DENIED.
+            return options.create(&path.0);
+        }
+
+        // Needed by `apply_pipe_security`: WRITE_DAC to replace the DACL,
+        // WRITE_OWNER to lower the mandatory label.
+        options.write_dac(true);
+        options.write_owner(true);
+        let server = options.create(&path.0)?;
+        apply_pipe_security(&server)?;
+        Ok(server)
     }
 
     pub async fn bind(path: impl Into<String>) -> io::Result<Self> {
